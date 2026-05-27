@@ -99,6 +99,18 @@ ttmux spawn --file release tasks.txt
 | `ttmux capture <session> [--lines N]` | Capture pane output |
 | `ttmux collect <group> [--json]` | Collect all task outputs |
 
+### Multi-Agent (Claude)
+
+| Command | Description |
+|---------|-------------|
+| `ttmux agent spawn <g> <n> <task> ...` | Launch multiple Claude agents |
+| `ttmux agent status <group>` | Agent group status |
+| `ttmux agent send <session> <msg>` | Send follow-up to an agent |
+| `ttmux agent collect <group> [--json]` | Collect agent outputs |
+| `ttmux agent kill <group>` | Clean up agent group |
+
+Options: `--dir <path>` `--model <model>` `--perm <mode>` `--max-turns <N>`
+
 ### Window & Pane
 
 | Command | Description |
@@ -129,7 +141,7 @@ ttmux is designed to be called by [Claude Code](https://claude.ai/code) and othe
 ```bash
 # Install the skill
 mkdir -p ~/.claude/skills
-cp skills/ttmux.md ~/.claude/skills/
+cp SKILL.md ~/.claude/skills/ttmux.md
 ```
 
 Then use `/ttmux` in Claude Code to decompose tasks into parallel workers.

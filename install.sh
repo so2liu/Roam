@@ -49,11 +49,11 @@ chmod +x "${INSTALL_DIR}/ttmux"
 info "ttmux 已安装到 ${INSTALL_DIR}/ttmux"
 
 # 安装 Claude Code skill
-if [[ -f "${SCRIPT_DIR}/skills/ttmux.md" ]]; then
+if [[ -f "${SCRIPT_DIR}/SKILL.md" ]]; then
     mkdir -p "$SKILL_DIR"
-    cp "${SCRIPT_DIR}/skills/ttmux.md" "${SKILL_DIR}/ttmux.md"
+    cp "${SCRIPT_DIR}/SKILL.md" "${SKILL_DIR}/ttmux.md"
     info "Claude Code skill 已安装"
-elif curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/skills/ttmux.md" \
+elif curl -fsSL "https://raw.githubusercontent.com/${REPO}/${BRANCH}/SKILL.md" \
         -o /tmp/ttmux-skill.md 2>/dev/null; then
     mkdir -p "$SKILL_DIR"
     mv /tmp/ttmux-skill.md "${SKILL_DIR}/ttmux.md"
