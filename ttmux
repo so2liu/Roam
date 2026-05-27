@@ -55,17 +55,23 @@ _session_exists() {
 }
 
 _pretty_sessions() {
-    if ! "$TMUX_BIN" list-sessions 2>/dev/null | head -1 &>/dev/null; then
+    local lines
+    lines=$("$TMUX_BIN" list-sessions -F '#{session_name}	#{session_windows}	#{session_created}	#{session_attached}' 2>/dev/null) || true
+    if [[ -z "$lines" ]]; then
         msg_info "没有活跃会话"
         return
     fi
     echo ""
-    "$TMUX_BIN" list-sessions -F \
-        "   ${icon_session} ${bold}#{session_name}${reset}  ${dim}#{session_windows} 个窗口  创建于 #{session_created_string}${reset}  #{?session_attached,${green}[已连接]${reset},${dim}[空闲]${reset}}" \
-        2>/dev/null
+    local count=0
+    while IFS=$'\t' read -r name windows created attached; do
+        local att_str="${dim}[空闲]${reset}"
+        [[ "$attached" == "1" ]] && att_str="${green}[已连接]${reset}"
+        local time_str
+        time_str=$(date -d "@${created}" '+%m-%d %H:%M' 2>/dev/null || date -r "${created}" '+%m-%d %H:%M' 2>/dev/null || echo "${created}")
+        echo -e "   ${icon_session} ${bold}${name}${reset}  ${dim}${windows} 个窗口  ${time_str}${reset}  ${att_str}"
+        ((count++)) || true
+    done <<< "$lines"
     echo ""
-    local count
-    count=$(_session_count)
     echo -e "   ${dim}共 ${count} 个会话${reset}"
     echo ""
 }
@@ -96,7 +102,7 @@ _pick_session() {
             attached=" ${green}[已连接]${reset}"
         fi
         echo -e "   ${cyan}${i})${reset} ${s}${attached}" >&2
-        ((i++))
+        ((i++)) || true
     done
     echo "" >&2
     read -r -p "   输入编号或名称: " choice </dev/tty
@@ -122,7 +128,7 @@ _json_sessions() {
         first=false
         printf '  {"name":"%s","windows":%s,"created":"%s","attached":%s}' \
             "$name" "$windows" "$created" "$attached"
-    done < <("$TMUX_BIN" list-sessions -F '#{session_name}	#{session_windows}	#{session_created_string}	#{session_attached}' 2>/dev/null)
+    done < <("$TMUX_BIN" list-sessions -F '#{session_name}	#{session_windows}	#{session_created}	#{session_attached}' 2>/dev/null)
     echo ""
     echo "]"
 }
@@ -167,11 +173,11 @@ _group_list() {
         local total=0 alive=0 dead=0
         while IFS= read -r sess; do
             [[ -n "$sess" ]] || continue
-            ((total++))
+            ((total++)) || true
             if _session_exists "$sess"; then
-                ((alive++))
+                ((alive++)) || true
             else
-                ((dead++))
+                ((dead++)) || true
             fi
         done < <(_group_sessions "$g")
         local status_str
@@ -287,7 +293,7 @@ _do_spawn() {
         "$TMUX_BIN" send-keys -t "$sess_name" "$cmd" C-m
 
         _group_add_session "$group" "$sess_name"
-        ((count++))
+        ((count++)) || true
         msg_ok "启动 ${bold}${sess_name}${reset}: ${dim}${cmd}${reset}"
     done
 
@@ -613,7 +619,7 @@ _interactive_wait_collect() {
     local i=1
     for g in "${groups[@]}"; do
         echo -e "    ${cyan}${i}${reset}) ${g}"
-        ((i++))
+        ((i++)) || true
     done
     echo ""
     read -r -p "  编号: " choice </dev/tty
@@ -657,7 +663,7 @@ _interactive_group_kill() {
     local i=1
     for g in "${groups[@]}"; do
         echo -e "    ${cyan}${i}${reset}) ${g}"
-        ((i++))
+        ((i++)) || true
     done
     echo ""
     read -r -p "  编号: " choice </dev/tty
@@ -997,9 +1003,15 @@ case "$cmd" in
         ;;
     lw)
         echo ""
-        "$TMUX_BIN" list-windows -F \
-            "   ${icon_window} ${bold}#I${reset}  #{window_name}  #{?window_active,${green}[活跃]${reset},}" \
-            "$@" 2>/dev/null || msg_err "无法列出窗口"
+        local wlines
+        wlines=$("$TMUX_BIN" list-windows -F '#{window_index}	#{window_name}	#{window_active}' "$@" 2>/dev/null) || { msg_err "无法列出窗口"; }
+        if [[ -n "${wlines:-}" ]]; then
+            while IFS=$'\t' read -r widx wname wactive; do
+                local act_str=""
+                [[ "$wactive" == "1" ]] && act_str=" ${green}[活跃]${reset}"
+                echo -e "   ${icon_window} ${bold}${widx}${reset}  ${wname}${act_str}"
+            done <<< "$wlines"
+        fi
         echo ""
         ;;
     kw)
