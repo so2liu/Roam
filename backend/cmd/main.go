@@ -9,9 +9,13 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 
+	"ttmux-web/browser"
 	"ttmux-web/server"
 )
 
@@ -36,17 +40,38 @@ func main() {
 		log.Printf("⚠ 找不到 ttmux (%s)，请确认已安装并在 PATH 中", bin)
 	}
 
+	// 两步验证：密钥初始种子来自 TTMUX_WEB_TOTP_SECRET（默认关闭）；
+	// 之后可在控制台「系统配置」里开启/关闭，状态持久化到 totp.json（以文件为准）。
+	// TTMUX_WEB_2FA=off/0/false/no 可让初始种子失效（默认关闭）。
+	totp := os.Getenv("TTMUX_WEB_TOTP_SECRET")
+	switch strings.ToLower(os.Getenv("TTMUX_WEB_2FA")) {
+	case "off", "0", "false", "no":
+		totp = ""
+	}
+
 	cfg := server.Config{
 		TTmuxBin:    bin,
 		LogsDir:     logsDir(),
 		FrontendDir: fdir,
 		KannaURL:    os.Getenv("TTMUX_KANNA_URL"),
 		Password:    pw,
+		TOTPSecret:  totp,
+		TOTPState:   filepath.Join(dataDir(), "totp.json"),
 		LockAfter:   atoiOr(os.Getenv("TTMUX_WEB_LOCK_AFTER"), 10),
 		LockSecs:    atoiOr(os.Getenv("TTMUX_WEB_LOCK_SECS"), 30),
 	}
 
 	r := server.New(cfg)
+
+	// 退出时回收本进程拉起的 Chrome（含其子进程组），避免泄漏孤儿进程
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		browser.Shutdown()
+		os.Exit(0)
+	}()
+
 	log.Printf("ttmux-web 监听 http://%s  (ttmux=%s)", bind, bin)
 	if err := r.Run(bind); err != nil {
 		log.Fatal(err)
@@ -84,14 +109,16 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-func logsDir() string {
+func dataDir() string {
 	data := os.Getenv("TTMUX_DATA")
 	if data == "" {
 		home, _ := os.UserHomeDir()
 		data = filepath.Join(home, ".local", "share", "ttmux")
 	}
-	return filepath.Join(data, "logs")
+	return data
 }
+
+func logsDir() string { return filepath.Join(dataDir(), "logs") }
 
 // frontendDir 解析前端构建产物目录（仓库根 frontend/dist，与后端分离）。
 // 优先 TTMUX_WEB_FRONTEND；否则在可执行文件与工作目录附近探测。

@@ -6,10 +6,17 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Layout, Menu, Button, Card, List, Tag, Form, Input, Select, Segmented,
-  Statistic, Row, Col, Space, Popconfirm, Empty, Modal, Grid, App as AntApp, Typography, Spin, Tooltip,
+  Statistic, Row, Col, Space, Popconfirm, Empty, Modal, Grid, App as AntApp, Typography, Spin, Tooltip, Dropdown, Checkbox,
 } from 'antd'
+import { QRCodeSVG } from 'qrcode.react'
 import { api, setUnauthorizedHandler } from './api'
 import Term, { TermHandle, TermStatus } from './Terminal'
+import ClaudeChat from './ClaudeChat'
+import CodexChat from './CodexChat'
+import FileBrowser from './FileBrowser'
+import BrowserView from './BrowserView'
+
+interface ClaudeInfo { running: boolean; file?: string; dir?: string }
 
 const { Sider, Content } = Layout
 const { useBreakpoint } = Grid
@@ -19,7 +26,8 @@ const NAV = [
   { key: 'overview', label: '概览' },
   { key: 'sessions', label: '会话' },
   { key: 'tasks', label: '任务' },
-  { key: 'env', label: '环境变量' },
+  { key: 'env', label: '系统配置' },
+  { key: 'browser', label: '浏览器' },
 ]
 
 // 线性图标（无 emoji，currentColor 描边）
@@ -32,6 +40,7 @@ const ICONS: Record<string, any> = {
   sessions: svg(<><polyline points="5 8 9 12 5 16" /><line x1="12" y1="16" x2="18" y2="16" /></>),
   tasks: svg(<><line x1="9" y1="6" x2="20" y2="6" /><line x1="9" y1="12" x2="20" y2="12" /><line x1="9" y1="18" x2="20" y2="18" /><circle cx="4.5" cy="6" r="1.1" /><circle cx="4.5" cy="12" r="1.1" /><circle cx="4.5" cy="18" r="1.1" /></>),
   env: svg(<><line x1="4" y1="7" x2="20" y2="7" /><circle cx="9" cy="7" r="2.3" /><line x1="4" y1="17" x2="20" y2="17" /><circle cx="15" cy="17" r="2.3" /></>),
+  browser: svg(<><rect x="3" y="4" width="18" height="16" rx="2" /><line x1="3" y1="9" x2="21" y2="9" /><circle cx="6" cy="6.5" r="0.6" /><circle cx="8.4" cy="6.5" r="0.6" /></>),
 }
 
 
@@ -39,6 +48,38 @@ const KEYS: [string, string][] = [
   ['Esc', '\x1b'], ['Tab', '\t'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['←', '\x1b[D'], ['→', '\x1b[C'],
   ['^C', '\x03'], ['^D', '\x04'], ['Space', ' '], ['y', 'y'], ['n', 'n'], ['/', '/'], ['q', 'q'],
 ]
+
+// tmux 基操菜单：前缀键 C-b(\x02) + 命令键，直接发给 tmux attach
+// （key 即要发送的字节序列，onClick 时原样发出）
+const PFX = '\x02'
+const TMUX_MENU = [
+  { type: 'group', label: '分屏', children: [
+    { key: PFX + '%', label: '竖分屏 — 左右 ▏▏' },
+    { key: PFX + '"', label: '横分屏 — 上下 ▔▁' },
+  ]},
+  { type: 'group', label: '窗格 (Pane)', children: [
+    { key: PFX + 'o', label: '切到下一个窗格' },
+    { key: PFX + '\x1b[A', label: '选上方窗格 ↑' },
+    { key: PFX + '\x1b[B', label: '选下方窗格 ↓' },
+    { key: PFX + '\x1b[D', label: '选左侧窗格 ←' },
+    { key: PFX + '\x1b[C', label: '选右侧窗格 →' },
+    { key: PFX + 'z', label: '最大化 / 还原窗格' },
+    { key: PFX + ' ', label: '切换布局' },
+    { key: PFX + 'x', label: '关闭当前窗格', danger: true },
+  ]},
+  { type: 'group', label: '窗口 (Window)', children: [
+    { key: PFX + 'c', label: '新建窗口' },
+    { key: PFX + 'n', label: '下一个窗口' },
+    { key: PFX + 'p', label: '上一个窗口' },
+    { key: PFX + 'w', label: '窗口列表' },
+    { key: PFX + ',', label: '重命名窗口' },
+  ]},
+  { type: 'group', label: '其他', children: [
+    { key: PFX + '[', label: '复制模式（翻历史）' },
+    { key: PFX + 'd', label: '断开会话 (detach)' },
+    { key: PFX + 't', label: '显示时钟' },
+  ]},
+] as const
 
 function StatusTag({ status, code }: { status?: string; code?: string }) {
   if (status === 'running') return <Tag color="processing">运行中</Tag>
@@ -52,10 +93,10 @@ function TypeTag({ type }: { type?: string }) {
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null)
   const [kanna, setKanna] = useState('')
-  const [tab, setTab] = useState('sessions')
+  const [tab, setTab] = useState(() => location.hash.replace(/^#\/?/, '') || 'sessions')
+  const go = (k: string) => { location.hash = '#/' + k } // hash 路由：/#/xxx
   const [collapsed, setCollapsed] = useState(false)
   const screens = useBreakpoint()
-  const isDesktop = !!screens.xl
   const hasSider = !!screens.md
   const isMobile = !screens.md
 
@@ -63,23 +104,54 @@ export default function App() {
   const [terms, setTerms] = useState<string[]>([])
   const [active, setActive] = useState<string | null>(null)
   const [overlay, setOverlay] = useState(false) // 手机/平板全屏终端
+  const [dockOpen, setDockOpen] = useState(true) // 桌面：右侧终端停靠栏是否展开
   const [fontSize, setFontSize] = useState(13)
-  const termNarrow = isDesktop && terms.length > 0 // 终端打开后列表栏收窄
   const [statusMap, setStatusMap] = useState<Record<string, TermStatus>>({})
   const termRefs = useRef<Record<string, TermHandle | null>>({})
+  // Claude Code / Codex 检测（针对已打开的终端）+ 每个标签的「对话/终端」视图切换
+  const [claudeMap, setClaudeMap] = useState<Record<string, ClaudeInfo>>({})
+  const [claudeView, setClaudeView] = useState<Record<string, boolean>>({})
+  const [codexMap, setCodexMap] = useState<Record<string, ClaudeInfo>>({})
+  const [codexView, setCodexView] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     setUnauthorizedHandler(() => setAuthed(false))
     api('GET', '/me').then((r) => { setAuthed(true); setKanna(r?.data?.kanna || '') }).catch(() => setAuthed(false))
   }, [])
 
+  // hash 路由：URL #/xxx 与当前页同步（支持前进/后退、刷新保持、收藏分享）
+  useEffect(() => {
+    const apply = () => setTab(location.hash.replace(/^#\/?/, '') || 'sessions')
+    apply()
+    window.addEventListener('hashchange', apply)
+    return () => window.removeEventListener('hashchange', apply)
+  }, [])
+
+  // 轮询已打开终端是否在跑 claude / codex（决定是否提供对话入口）
+  useEffect(() => {
+    if (!authed || terms.length === 0) return
+    let stop = false
+    const check = () => terms.forEach(async (n) => {
+      try { const r = await api('GET', `/sessions/${encodeURIComponent(n)}/claude`); if (!stop) setClaudeMap((m) => ({ ...m, [n]: r.data })) } catch {}
+      try { const r = await api('GET', `/sessions/${encodeURIComponent(n)}/codex`); if (!stop) setCodexMap((m) => ({ ...m, [n]: r.data })) } catch {}
+    })
+    check()
+    const t = setInterval(check, 5000)
+    return () => { stop = true; clearInterval(t) }
+  }, [authed, terms])
+
   if (authed === null) return <div style={{ height: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>
-  if (!authed) return <Login onOk={() => { setAuthed(true); setTab('overview') }} />
+  if (!authed) return <Login onOk={() => { setAuthed(true); go('overview') }} />
+
+  // 独立单终端页（新标签全屏打开）：URL 带 ?term=<会话名>
+  const soloName = new URLSearchParams(location.search).get('term')
+  if (soloName) return <SoloTerminal name={soloName} />
 
   const openTerm = (name: string) => {
     setTerms((ts) => (ts.includes(name) ? ts : [...ts, name]))
     setActive(name)
-    if (!isDesktop) setOverlay(true)
+    if (hasSider) setDockOpen(true) // 桌面：拉出右侧停靠栏（压缩页面到左）
+    else setOverlay(true)           // 手机/平板：全屏
   }
   const closeTerm = (name: string) => {
     setTerms((ts) => {
@@ -90,6 +162,8 @@ export default function App() {
     })
     delete termRefs.current[name]
   }
+  const anyClaude = terms.some((t) => claudeMap[t]?.running || codexMap[t]?.running)
+  const docked = hasSider && terms.length > 0 && dockOpen // 桌面停靠栏已展开
   const setStatus = (name: string, s: TermStatus) => setStatusMap((m) => ({ ...m, [name]: s }))
   const sendKey = (seq: string) => active && termRefs.current[active]?.send(seq)
 
@@ -98,20 +172,23 @@ export default function App() {
       terms={terms} active={active} setActive={setActive} closeTerm={closeTerm}
       fontSize={fontSize} setFontSize={setFontSize} statusMap={statusMap} setStatus={setStatus}
       termRefs={termRefs} sendKey={sendKey}
-      onCollapse={!isDesktop ? () => setOverlay(false) : undefined}
+      claudeMap={claudeMap} claudeView={claudeView} setClaudeView={setClaudeView}
+      codexMap={codexMap} codexView={codexView} setCodexView={setCodexView}
+      onCollapse={() => { setOverlay(false); setDockOpen(false) }}
     />
   )
 
   const pages: any = {
-    overview: <Overview goTask={() => setTab('tasks')} openTerm={openTerm} />,
+    overview: <Overview goTask={() => go('tasks')} openTerm={openTerm} />,
     tasks: <Tasks openTerm={openTerm} kanna={kanna} />,
     sessions: <Sessions openTerm={openTerm} />,
     env: <EnvPage />,
+    browser: <BrowserView />,
   }
 
   const menu = (
     <Menu
-      theme="dark" mode="inline" selectedKeys={[tab]} onClick={(e) => setTab(e.key)}
+      theme="dark" mode="inline" selectedKeys={[tab]} onClick={(e) => go(e.key)}
       items={NAV.map((n) => ({ key: n.key, icon: ICONS[n.key], label: n.label }))}
       style={{ borderInlineEnd: 0, background: 'transparent' }}
     />
@@ -159,17 +236,44 @@ export default function App() {
         </Sider>
       )}
 
+      {/* 主区：左侧页面 + 右侧可停靠终端栏（桌面）。开终端时页面向左压缩。*/}
       <Layout style={{ background: '#0d1117' }}>
-        <div style={{ flex: 1, display: 'flex', minHeight: 0, height: '100vh', background: '#0d1117' }}>
-          {/* 开了终端后，列表栏收窄给终端让位 */}
+        <div style={{ display: 'flex', height: '100vh', minHeight: 0 }}>
           <Content style={{
-            flex: termNarrow ? '0 0 320px' : 1, width: termNarrow ? 320 : 'auto',
-            overflow: 'auto', padding: 14, paddingBottom: isMobile ? 76 : 14, transition: 'flex-basis .2s',
+            // 终端弹出时，左侧页面收到尽量窄，把空间让给终端
+            flex: docked && tab !== 'browser' ? '0 0 300px' : 1,
+            width: docked && tab !== 'browser' ? 300 : 'auto', minWidth: 0,
+            height: '100vh', overflow: tab === 'browser' ? 'hidden' : 'auto',
+            padding: tab === 'browser' ? 0 : 14,
+            paddingBottom: isMobile ? 76 : (tab === 'browser' ? 0 : 14),
+            transition: 'flex-basis .2s',
           }}>
-            {pages[tab]}
+            {pages[tab] || pages.sessions}
           </Content>
-          {isDesktop && (
-            <div style={{ flex: termNarrow ? 1 : '0 0 48%', minWidth: 420, borderLeft: '1px solid #30363d', display: 'flex', flexDirection: 'column', background: '#06090d' }}>
+
+          {/* 角标把手：开终端后常驻右缘，点一下开合停靠栏（桌面）*/}
+          {hasSider && terms.length > 0 && (
+            <div onClick={() => setDockOpen((o) => !o)} title={dockOpen ? '收起终端' : '展开终端'}
+              style={{
+                flex: '0 0 22px', cursor: 'pointer', background: '#161b22', borderLeft: '1px solid #30363d',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+                color: anyClaude ? '#d2a8ff' : '#8b949e', userSelect: 'none',
+              }}>
+              <span style={{ fontSize: 13 }}>{dockOpen ? '▸' : '◂'}</span>
+              <span style={{ writingMode: 'vertical-rl', letterSpacing: 2, fontSize: 12 }}>
+                {anyClaude ? '🤖 终端' : '终端'}
+              </span>
+              <span style={{ fontSize: 11, background: '#1f6feb', color: '#fff', borderRadius: 9, padding: '0 6px' }}>{terms.length}</span>
+            </div>
+          )}
+
+          {/* 右侧终端停靠栏（桌面）：常驻挂载以保留连接，收起时宽度归零 */}
+          {hasSider && terms.length > 0 && (
+            <div style={{
+              flex: dockOpen ? 1 : '0 0 0px', minWidth: dockOpen ? 480 : 0,
+              width: dockOpen ? 'auto' : 0, overflow: 'hidden', transition: 'flex-basis .2s, min-width .2s',
+              display: 'flex', flexDirection: 'column', background: '#06090d',
+            }}>
               {termPane}
             </div>
           )}
@@ -179,7 +283,7 @@ export default function App() {
       {isMobile && (
         <nav style={{ position: 'fixed', bottom: 0, left: 0, right: 0, display: 'flex', background: '#161b22', borderTop: '1px solid #30363d', zIndex: 50, paddingBottom: 'env(safe-area-inset-bottom)' }}>
           {NAV.map((n) => (
-            <button key={n.key} onClick={() => setTab(n.key)}
+            <button key={n.key} onClick={() => go(n.key)}
               style={{ flex: 1, border: 0, background: 'none', color: tab === n.key ? '#58a6ff' : '#8b949e', padding: '8px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, fontSize: 11 }}>
               {ICONS[n.key]}{n.label}
             </button>
@@ -191,8 +295,8 @@ export default function App() {
         </nav>
       )}
 
-      {/* 手机/平板：全屏终端覆盖层 */}
-      {!isDesktop && overlay && (
+      {/* 手机/平板：全屏会话覆盖层（桌面用右侧停靠栏，不走这里）*/}
+      {isMobile && overlay && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 100, background: '#06090d', display: 'flex', flexDirection: 'column' }}>
           {termPane}
         </div>
@@ -205,6 +309,42 @@ export default function App() {
   }
 }
 
+// ── 独立单终端页：新浏览器标签全屏打开单个会话（URL ?term=name）──
+function SoloTerminal({ name }: { name: string }) {
+  const [fontSize, setFontSize] = useState(13)
+  const [statusMap, setStatusMap] = useState<Record<string, TermStatus>>({})
+  const [claudeMap, setClaudeMap] = useState<Record<string, ClaudeInfo>>({})
+  const [claudeView, setClaudeView] = useState<Record<string, boolean>>({})
+  const [codexMap, setCodexMap] = useState<Record<string, ClaudeInfo>>({})
+  const [codexView, setCodexView] = useState<Record<string, boolean>>({})
+  const termRefs = useRef<Record<string, TermHandle | null>>({})
+
+  useEffect(() => { document.title = `ttmux · ${name}` }, [name])
+  useEffect(() => {
+    let stop = false
+    const check = async () => {
+      try { const r = await api('GET', `/sessions/${encodeURIComponent(name)}/claude`); if (!stop) setClaudeMap((m) => ({ ...m, [name]: r.data })) } catch {}
+      try { const r = await api('GET', `/sessions/${encodeURIComponent(name)}/codex`); if (!stop) setCodexMap((m) => ({ ...m, [name]: r.data })) } catch {}
+    }
+    check()
+    const t = setInterval(check, 5000)
+    return () => { stop = true; clearInterval(t) }
+  }, [name])
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: '#06090d', display: 'flex', flexDirection: 'column' }}>
+      <TerminalPane
+        terms={[name]} active={name} setActive={() => {}} closeTerm={() => window.close()}
+        fontSize={fontSize} setFontSize={setFontSize}
+        statusMap={statusMap} setStatus={(n, s) => setStatusMap((m) => ({ ...m, [n]: s }))}
+        termRefs={termRefs} sendKey={(seq) => termRefs.current[name]?.send(seq)}
+        claudeMap={claudeMap} claudeView={claudeView} setClaudeView={setClaudeView}
+        codexMap={codexMap} codexView={codexView} setCodexView={setCodexView}
+      />
+    </div>
+  )
+}
+
 // ── 终端面板（多标签 + 工具栏 + 快捷键栏），桌面右栏与手机覆盖层共用 ──
 function TerminalPane(props: {
   terms: string[]; active: string | null; setActive: (n: string) => void; closeTerm: (n: string) => void
@@ -212,11 +352,26 @@ function TerminalPane(props: {
   statusMap: Record<string, TermStatus>; setStatus: (n: string, s: TermStatus) => void
   termRefs: React.MutableRefObject<Record<string, TermHandle | null>>
   sendKey: (seq: string) => void; onCollapse?: () => void
+  claudeMap: Record<string, ClaudeInfo>; claudeView: Record<string, boolean>; setClaudeView: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
+  codexMap: Record<string, ClaudeInfo>; codexView: Record<string, boolean>; setCodexView: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
 }) {
-  const { terms, active, setActive, closeTerm, fontSize, setFontSize, statusMap, setStatus, termRefs, sendKey, onCollapse } = props
+  const { terms, active, setActive, closeTerm, fontSize, setFontSize, statusMap, setStatus, termRefs, sendKey, onCollapse, claudeMap, claudeView, setClaudeView, codexMap, codexView, setCodexView } = props
   const { message } = AntApp.useApp()
   const st = active ? statusMap[active] : undefined
   const dot = st === 'connected' ? '#3fb950' : st === 'connecting' ? '#d29922' : '#f85149'
+
+  // 文件侧栏（终端视图下也可用）：定位到当前会话的工作目录
+  const [showFiles, setShowFiles] = useState(false)
+  const [cwd, setCwd] = useState('')
+  useEffect(() => {
+    if (!active) { setCwd(''); return }
+    // 优先用 claude/codex 已知工作目录，否则查会话 pane 当前路径
+    const known = claudeMap[active]?.dir || codexMap[active]?.dir
+    if (known) { setCwd(known); return }
+    let stop = false
+    api('GET', `/sessions/${encodeURIComponent(active)}/cwd`).then((r) => { if (!stop) setCwd(r.data?.dir || '') }).catch(() => {})
+    return () => { stop = true }
+  }, [active, claudeMap, codexMap])
 
   if (terms.length === 0) {
     return (
@@ -241,6 +396,8 @@ function TerminalPane(props: {
               background: t === active ? '#1f6feb33' : 'transparent', border: t === active ? '1px solid #1f6feb' : '1px solid #30363d', color: '#e6edf3',
             }}>
             <i style={{ width: 7, height: 7, borderRadius: '50%', background: (statusMap[t] === 'connected' ? '#3fb950' : statusMap[t] === 'connecting' ? '#d29922' : '#f85149') }} />
+            {claudeMap[t]?.running && <span title="正在运行 Claude Code">🤖</span>}
+            {codexMap[t]?.running && <span title="正在运行 Codex" style={{ color: '#10a37f' }}>✸</span>}
             {t}
             <a onClick={(e) => { e.stopPropagation(); closeTerm(t) }} style={{ color: '#8b949e' }}>×</a>
           </span>
@@ -253,6 +410,34 @@ function TerminalPane(props: {
           <i style={{ width: 8, height: 8, borderRadius: '50%', background: dot }} />
           {st === 'connected' ? '已连接' : st === 'connecting' ? '连接中' : '已断开'}
         </span>
+        {active && claudeMap[active]?.running && (
+          <Tooltip title="切换到 Claude Code 对话界面">
+            <Button size="small" type={claudeView[active] ? 'primary' : 'default'}
+              onClick={() => setClaudeView((v) => ({ ...v, [active!]: !v[active!] }))}>🤖 Claude</Button>
+          </Tooltip>
+        )}
+        {active && codexMap[active]?.running && (
+          <Tooltip title="切换到 Codex 对话界面">
+            <Button size="small" type={codexView[active] ? 'primary' : 'default'}
+              style={codexView[active] ? { background: '#10a37f', borderColor: '#10a37f' } : {}}
+              onClick={() => setCodexView((v) => ({ ...v, [active!]: !v[active!] }))}>✸ Codex</Button>
+          </Tooltip>
+        )}
+        <Dropdown
+          trigger={['click']}
+          menu={{ items: TMUX_MENU as any, onClick: ({ key }) => sendKey(key) }}
+          placement="bottomLeft"
+        >
+          <Button size="small" type="primary" ghost>tmux ▾</Button>
+        </Dropdown>
+        {active && (
+          <Tooltip title="在新浏览器标签全屏打开此会话">
+            <Button size="small" onClick={() => window.open(`/?term=${encodeURIComponent(active)}`, '_blank')}>↗ 新标签</Button>
+          </Tooltip>
+        )}
+        <Tooltip title="文件浏览（当前会话工作目录）">
+          <Button size="small" type={showFiles ? 'primary' : 'default'} onClick={() => setShowFiles((s) => !s)}>📁 文件</Button>
+        </Tooltip>
         <span style={{ flex: 1 }} />
         <Tooltip title="上翻看历史对话"><Button size="small" onClick={() => active && termRefs.current[active]?.scroll(-12)}>▲</Button></Tooltip>
         <Tooltip title="回到最新"><Button size="small" onClick={() => active && termRefs.current[active]?.toBottom()}>▼底</Button></Tooltip>
@@ -262,13 +447,30 @@ function TerminalPane(props: {
         <Tooltip title="重新连接"><Button size="small" onClick={() => active && termRefs.current[active]?.reconnect()}>重连</Button></Tooltip>
       </div>
 
-      {/* 终端区（所有标签常驻，仅激活可见，保留滚动历史） */}
-      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        {terms.map((t) => (
-          <div key={t} style={{ position: 'absolute', inset: 0, display: t === active ? 'block' : 'none', padding: 6 }}>
-            <Term ref={(h) => { termRefs.current[t] = h }} name={t} fontSize={fontSize} active={t === active} onStatus={(s) => setStatus(t, s)} />
+      {/* 终端区（所有标签常驻，仅激活可见，保留滚动历史）+ 可选文件侧栏 */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+          {terms.map((t) => (
+            <div key={t} style={{ position: 'absolute', inset: 0, display: t === active ? 'block' : 'none', padding: 6 }}>
+              <Term ref={(h) => { termRefs.current[t] = h }} name={t} fontSize={fontSize} active={t === active} onStatus={(s) => setStatus(t, s)} />
+              {claudeView[t] && claudeMap[t]?.running && (
+                <div style={{ position: 'absolute', inset: 0 }}>
+                  <ClaudeChat name={t} file={claudeMap[t].file} dir={claudeMap[t].dir} onBack={() => setClaudeView((v) => ({ ...v, [t]: false }))} />
+                </div>
+              )}
+              {codexView[t] && codexMap[t]?.running && (
+                <div style={{ position: 'absolute', inset: 0 }}>
+                  <CodexChat name={t} file={codexMap[t].file} dir={codexMap[t].dir} onBack={() => setCodexView((v) => ({ ...v, [t]: false }))} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        {showFiles && (
+          <div style={{ flex: '0 0 clamp(220px, 34%, 340px)', minWidth: 0 }}>
+            <FileBrowser dir={cwd} accent="#58a6ff" onClose={() => setShowFiles(false)} />
           </div>
-        ))}
+        )}
       </div>
 
       {/* 快捷键栏 */}
@@ -283,20 +485,44 @@ function TerminalPane(props: {
 }
 
 // ── 登录 ──
+const PW_KEY = 'ttmux_pw' // 「记住密码」本地存储键
 function Login({ onOk }: { onOk: () => void }) {
   const { message } = AntApp.useApp()
   const [loading, setLoading] = useState(false)
+  const [totp, setTotp] = useState(false) // 是否开启两步验证
+  const saved = (() => { try { return localStorage.getItem(PW_KEY) || '' } catch { return '' } })()
+
+  // 问后端是否要动态码（公开端点）
+  useEffect(() => { api('GET', '/pubconfig').then((r) => setTotp(!!r?.data?.totp)).catch(() => {}) }, [])
+
   return (
     <div style={{ height: '100vh', display: 'grid', placeItems: 'center', padding: 16, background: '#0d1117' }}>
       <Card style={{ width: 'min(360px,92vw)' }}>
         <div style={{ textAlign: 'center', fontSize: 22, fontWeight: 700, marginBottom: 16 }}>ttmux 控制台</div>
-        <Form onFinish={async (v) => {
-          setLoading(true)
-          try { await api('POST', '/login', { password: v.password }); onOk() }
-          catch { message.error('登录失败') } finally { setLoading(false) }
-        }}>
+        <Form
+          initialValues={{ password: saved, remember: !!saved }}
+          onFinish={async (v) => {
+            setLoading(true)
+            try {
+              await api('POST', '/login', { password: v.password, code: (v.code || '').trim() })
+              try { v.remember ? localStorage.setItem(PW_KEY, v.password) : localStorage.removeItem(PW_KEY) } catch {}
+              onOk()
+            }
+            catch (e: any) {
+              message.error(/BAD_CODE/.test(e.message) ? '动态码错误' : /LOCKED/.test(e.message) ? '尝试过多，已锁定' : '登录失败')
+            } finally { setLoading(false) }
+          }}
+        >
           <Form.Item name="password" rules={[{ required: true, message: '请输入口令' }]}>
-            <Input.Password size="large" placeholder="口令" autoFocus />
+            <Input.Password size="large" placeholder="口令" autoFocus={!saved} />
+          </Form.Item>
+          {totp && (
+            <Form.Item name="code" rules={[{ required: true, message: '请输入动态码' }]}>
+              <Input size="large" placeholder="Authenticator 动态码（6 位）" inputMode="numeric" maxLength={6} autoFocus={!!saved} />
+            </Form.Item>
+          )}
+          <Form.Item name="remember" valuePropName="checked" style={{ marginBottom: 12 }}>
+            <Checkbox>记住密码</Checkbox>
           </Form.Item>
           <Button type="primary" size="large" block htmlType="submit" loading={loading}>登 录</Button>
         </Form>
@@ -456,10 +682,23 @@ function NewSessionModal({ open, onClose, onDone }: { open: boolean; onClose: ()
 // ── 会话（可新建/指定目录 / 进终端 / 关闭） ──
 function Sessions({ openTerm }: { openTerm: (n: string) => void }) {
   const [list, setList] = useState<any[]>([])
+  const [cc, setCc] = useState<Record<string, boolean>>({})
+  const [cx, setCx] = useState<Record<string, boolean>>({})
   const [newOpen, setNewOpen] = useState(false)
   const { message } = AntApp.useApp()
   const load = () => api('GET', '/sessions').then(setList).catch(() => {})
   useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t) }, [])
+  // 标注哪些会话在跑 Claude Code
+  useEffect(() => {
+    let stop = false
+    const check = () => list.forEach(async (s: any) => {
+      try { const r = await api('GET', `/sessions/${encodeURIComponent(s.name)}/claude`); if (!stop) setCc((m) => ({ ...m, [s.name]: !!r.data?.running })) } catch {}
+      try { const r = await api('GET', `/sessions/${encodeURIComponent(s.name)}/codex`); if (!stop) setCx((m) => ({ ...m, [s.name]: !!r.data?.running })) } catch {}
+    })
+    if (list.length) check()
+    const t = setInterval(() => { if (list.length) check() }, 5000)
+    return () => { stop = true; clearInterval(t) }
+  }, [list])
   const kill = async (n: string) => { try { await api('DELETE', '/sessions/' + encodeURIComponent(n)); message.success('已关闭'); load() } catch (e: any) { message.error(e.message) } }
   return (
     <Card title="会话" extra={<Button type="primary" onClick={() => setNewOpen(true)}>+ 新建会话</Button>}>
@@ -469,7 +708,9 @@ function Sessions({ openTerm }: { openTerm: (n: string) => void }) {
             <a key="t" onClick={() => openTerm(s.name)}>终端</a>,
             <Popconfirm key="k" title={`关闭 ${s.name}？`} onConfirm={() => kill(s.name)}><a style={{ color: '#f85149' }}>关闭</a></Popconfirm>,
           ]}>
-            <List.Item.Meta title={s.name} description={`${s.windows} 窗口 · ${s.attached == 1 ? '已连接' : '空闲'}`} />
+            <List.Item.Meta
+              title={<Space>{cc[s.name] && <Tag color="purple" style={{ margin: 0 }}>🤖 Claude</Tag>}{cx[s.name] && <Tag color="green" style={{ margin: 0 }}>✸ Codex</Tag>}<span>{s.name}</span></Space>}
+              description={`${s.windows} 窗口 · ${s.attached == 1 ? '已连接' : '空闲'}`} />
           </List.Item>
         )} />
       )}
@@ -502,17 +743,110 @@ function EnvPage() {
     })
   }
   return (
-    <Card title="全局环境变量" extra={<Space>
-      <Button onClick={add}>+ 添加</Button>
-      <Button onClick={async () => { try { await api('POST', '/env/push'); message.success('已推送') } catch (e: any) { message.error(e.message) } }}>推送到会话</Button>
-    </Space>}>
-      {list.length === 0 ? <Empty description="无环境变量" /> : (
-        <List dataSource={list} renderItem={(kv: any) => (
-          <List.Item actions={[<Popconfirm key="d" title="删除？" onConfirm={async () => { try { await api('DELETE', '/env/' + encodeURIComponent(kv.key)); message.success('已删除'); load() } catch (e: any) { message.error(e.message) } }}><a style={{ color: '#f85149' }}>删除</a></Popconfirm>]}>
-            <List.Item.Meta title={<code>{kv.key}</code>} description={<code style={{ color: '#8b949e' }}>{kv.value}</code>} />
-          </List.Item>
-        )} />
-      )}
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+      <Card title="全局环境变量" extra={<Space>
+        <Button onClick={add}>+ 添加</Button>
+        <Button onClick={async () => { try { await api('POST', '/env/push'); message.success('已推送') } catch (e: any) { message.error(e.message) } }}>推送到会话</Button>
+      </Space>}>
+        {list.length === 0 ? <Empty description="无环境变量" /> : (
+          <List dataSource={list} renderItem={(kv: any) => (
+            <List.Item actions={[<Popconfirm key="d" title="删除？" onConfirm={async () => { try { await api('DELETE', '/env/' + encodeURIComponent(kv.key)); message.success('已删除'); load() } catch (e: any) { message.error(e.message) } }}><a style={{ color: '#f85149' }}>删除</a></Popconfirm>]}>
+              <List.Item.Meta title={<code>{kv.key}</code>} description={<code style={{ color: '#8b949e' }}>{kv.value}</code>} />
+            </List.Item>
+          )} />
+        )}
+      </Card>
+      <TwoFactorCard />
+    </Space>
+  )
+}
+
+// ── 两步验证 (TOTP / Authenticator)：可在 UI 里开启/关闭，即时生效并持久化 ──
+function TwoFactorCard() {
+  const { message } = AntApp.useApp()
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [setup, setSetup] = useState<{ uri: string; secret: string } | null>(null) // 开启流程中的待确认密钥
+  const [code, setCode] = useState('')
+  const [qr, setQr] = useState<{ uri: string; secret: string } | null>(null) // 查看当前二维码
+  const [busy, setBusy] = useState(false)
+
+  const refresh = () => api('GET', '/pubconfig').then((r) => setEnabled(!!r?.data?.totp)).catch(() => setEnabled(false))
+  useEffect(() => { refresh() }, [])
+
+  const startSetup = async () => {
+    try { const r = await api('GET', '/2fa/gen'); setSetup({ uri: r.data.uri, secret: r.data.secret }); setCode(''); setQr(null) }
+    catch (e: any) { message.error(e.message) }
+  }
+  const confirmEnable = async () => {
+    if (!setup) return
+    setBusy(true)
+    try { await api('POST', '/2fa/enable', { secret: setup.secret, code: code.trim() }); message.success('两步验证已开启'); setSetup(null); refresh() }
+    catch (e: any) { message.error(/BAD_CODE/.test(e.message) ? '动态码不正确，请用最新的码' : e.message) }
+    finally { setBusy(false) }
+  }
+  const disable = async () => {
+    try { await api('POST', '/2fa/disable'); message.success('两步验证已关闭'); setQr(null); refresh() }
+    catch (e: any) { message.error(e.message) }
+  }
+  const showCurrent = async () => {
+    try { const r = await api('GET', '/2fa/qr'); if (r.data?.enabled) setQr({ uri: r.data.uri, secret: r.data.secret }) }
+    catch (e: any) { message.error(e.message) }
+  }
+  const copy = (s: string) => { try { navigator.clipboard?.writeText(s) } catch {}; message.success('已复制') }
+
+  return (
+    <Card title="两步验证 (TOTP / Authenticator)" extra={
+      <Tag color={enabled ? 'green' : 'default'}>{enabled === null ? '…' : enabled ? '已开启' : '未开启'}</Tag>
+    }>
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        <Text type="secondary" style={{ fontSize: 13 }}>
+          开启后登录需「口令 + Authenticator 6 位动态码」。开关即时生效并持久化；也可用环境变量 <code>TTMUX_WEB_TOTP_SECRET</code> 预置。
+        </Text>
+
+        {!setup && (
+          <Space>
+            {enabled
+              ? <>
+                  <Button onClick={showCurrent}>查看二维码</Button>
+                  <Popconfirm title="确定关闭两步验证？" onConfirm={disable}><Button danger>关闭两步验证</Button></Popconfirm>
+                </>
+              : <Button type="primary" onClick={startSetup}>开启两步验证</Button>}
+          </Space>
+        )}
+
+        {/* 开启流程：扫码 → 输码确认 */}
+        {setup && (
+          <div style={{ padding: 16, background: '#0d1117', borderRadius: 8 }}>
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+              <div style={{ background: '#fff', padding: 10, borderRadius: 8 }}><QRCodeSVG value={setup.uri} size={168} /></div>
+              <div style={{ flex: 1, minWidth: 240 }}>
+                <div style={{ color: '#8b949e', fontSize: 12, marginBottom: 4 }}>① 用 Authenticator 扫码，或手动输入密钥：</div>
+                <Space.Compact style={{ width: '100%', marginBottom: 10 }}>
+                  <Input readOnly value={setup.secret} />
+                  <Button onClick={() => copy(setup.secret)}>复制</Button>
+                </Space.Compact>
+                <div style={{ color: '#8b949e', fontSize: 12, marginBottom: 4 }}>② 输入 App 上显示的 6 位码确认：</div>
+                <Space.Compact style={{ width: '100%' }}>
+                  <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder="6 位动态码" inputMode="numeric" maxLength={6} onPressEnter={confirmEnable} />
+                  <Button type="primary" loading={busy} onClick={confirmEnable}>确认开启</Button>
+                </Space.Compact>
+              </div>
+            </div>
+            <div style={{ marginTop: 10 }}><Button size="small" onClick={() => setSetup(null)}>取消</Button></div>
+          </div>
+        )}
+
+        {/* 查看当前二维码（已开启时给新设备加） */}
+        {qr && (
+          <div style={{ padding: 16, background: '#0d1117', borderRadius: 8, display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ background: '#fff', padding: 10, borderRadius: 8 }}><QRCodeSVG value={qr.uri} size={168} /></div>
+            <div style={{ flex: 1, minWidth: 240 }}>
+              <div style={{ color: '#8b949e', fontSize: 12, marginBottom: 4 }}>扫码把当前密钥加入新设备：</div>
+              <Space.Compact style={{ width: '100%' }}><Input readOnly value={qr.secret} /><Button onClick={() => copy(qr.secret)}>复制</Button></Space.Compact>
+            </div>
+          </div>
+        )}
+      </Space>
     </Card>
   )
 }

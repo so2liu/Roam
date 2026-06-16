@@ -1,0 +1,316 @@
+// 浏览器镜像页：把后端全局 Chrome 的画面实时渲染到 <img>，可选「接管」转发输入。
+// 协议见 backend/browser/screencast.go：
+//   收 {type:'frame', data, w, h} | {type:'pong', t} | {type:'error', msg}
+//   发 {type:'nav', url} | {type:'ping', t} | {type:'mouse'|'wheel'|'key', ...}（输入仅 control=1 生效）
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Button, Input, Space, Switch, Tag, Segmented, App as AntApp } from 'antd'
+import { api } from './api'
+
+interface TabInfo { id: string; title: string; url: string }
+
+// 单个标签：固定宽度 + 关闭按钮常驻（active 仅改颜色，不改尺寸 → 切换不回流/不易位）
+function BrowserTab({ tab, active, onSelect, onClose }: {
+  tab: TabInfo; active: boolean; onSelect: () => void; onClose: () => void
+}) {
+  return (
+    <div
+      onClick={onSelect}
+      title={tab.url}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, width: 150, flex: '0 0 auto', height: 28,
+        padding: '0 8px', borderRadius: 6, cursor: 'pointer', userSelect: 'none', fontSize: 12,
+        background: active ? '#283039' : 'transparent',
+        color: active ? '#e6edf3' : '#9aa4ae',
+        border: '1px solid ' + (active ? '#3d444d' : 'transparent'),
+      }}
+    >
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {tab.title || tab.url || 'about:blank'}
+      </span>
+      <span
+        onClick={(e) => { e.stopPropagation(); onClose() }}
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{ flex: '0 0 auto', width: 16, height: 16, lineHeight: '15px', textAlign: 'center', borderRadius: 4, color: '#8b949e' }}
+      >×</span>
+    </div>
+  )
+}
+
+// 标签栏：左=可横向滚动的标签 + 新建，右=固定区域(extra)。两侧宽度独立，互不挤占。
+function TabBar({ tabs, active, onSelect, onClose, onAdd, extra }: {
+  tabs: TabInfo[]; active: string
+  onSelect: (id: string) => void; onClose: (id: string) => void; onAdd: () => void; extra: ReactNode
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px 0', flex: '0 0 auto' }}>
+      <div style={{ display: 'flex', gap: 4, overflowX: 'auto', flex: 1, minWidth: 0 }}>
+        {tabs.map((t) => (
+          <BrowserTab key={t.id} tab={t} active={t.id === active} onSelect={() => onSelect(t.id)} onClose={() => onClose(t.id)} />
+        ))}
+        <button
+          onClick={onAdd}
+          title="新建标签"
+          style={{ flex: '0 0 auto', width: 28, height: 28, border: 'none', background: 'transparent', color: '#8b949e', cursor: 'pointer', fontSize: 16, borderRadius: 6 }}
+        >+</button>
+      </div>
+      <div style={{ flex: '0 0 auto' }}>{extra}</div>
+    </div>
+  )
+}
+
+// 清晰度档位（栏目级配置，存 localStorage）→ JPEG 质量
+const QKEY = 'ttmux.browser.quality'
+const QUALITY_OPTS = [
+  { label: '标清', value: 50 },
+  { label: '高清', value: 80 },
+  { label: '超清', value: 92 },
+]
+
+function fmtRate(bytesPerSec: number) {
+  if (bytesPerSec >= 1 << 20) return (bytesPerSec / (1 << 20)).toFixed(1) + ' MB/s'
+  return Math.round(bytesPerSec / 1024) + ' KB/s'
+}
+
+// 固定宽度数字槽：右对齐 + 等宽数字，数值变化不改变总宽（避免挤占/回流）
+function cell(text: string, w: number) {
+  return <span style={{ display: 'inline-block', width: w, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{text}</span>
+}
+
+export default function BrowserView() {
+  const { message } = AntApp.useApp()
+  const imgRef = useRef<HTMLImageElement>(null)
+  const stageRef = useRef<HTMLDivElement>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const sizeRef = useRef({ w: 1280, h: 800 }) // 画面内在尺寸（CDP 设备像素）
+  const [control, setControl] = useState(false)
+  const controlRef = useRef(false)
+  const [connected, setConnected] = useState(false)
+  const [url, setUrl] = useState('')
+  const addrFocused = useRef(false) // 地址栏聚焦时不被轮询回写覆盖
+  // 标签页（复用同一台 Chrome）
+  const [tabs, setTabs] = useState<TabInfo[]>([])
+  const [target, setTarget] = useState('') // 当前镜像的标签页 id；空 = 第一个
+  // 栏目级清晰度配置（持久化）
+  const [quality, setQuality] = useState<number>(() => Number(localStorage.getItem(QKEY)) || 80)
+  // 实时指标
+  const [latency, setLatency] = useState<number | null>(null)
+  const [bw, setBw] = useState(0)   // 字节/秒
+  const [fps, setFps] = useState(0)
+  const bytesRef = useRef(0)
+  const framesRef = useRef(0)
+
+  // control 开关用 ref 同步，供事件回调读取最新值
+  useEffect(() => { controlRef.current = control }, [control])
+
+  // 拉取标签页列表（每 3s 刷新，反映 agent 自己开的标签页/标题变化）
+  const loadTabs = async () => {
+    try {
+      const r = await api('GET', '/browser/tabs')
+      const list: TabInfo[] = r?.data || []
+      setTabs(list)
+      // 当前 target 已不存在 → 切到第一个
+      setTarget((t) => (list.some((x) => x.id === t) ? t : (list[0]?.id || '')))
+    } catch {}
+  }
+  useEffect(() => {
+    loadTabs()
+    const t = setInterval(loadTabs, 3000)
+    return () => clearInterval(t)
+  }, [])
+
+  const newTab = async () => {
+    try {
+      await api('POST', '/browser/tabs', { url: 'about:blank' })
+      const r = await api('GET', '/browser/tabs')
+      const list: TabInfo[] = r?.data || []
+      setTabs(list)
+      if (list.length) setTarget(list[list.length - 1].id) // 切到新建的那个
+    } catch (e: any) { message.error(e.message) }
+  }
+  const closeTab = async (id: string) => {
+    try { await api('DELETE', `/browser/tabs/${id}`); await loadTabs() }
+    catch (e: any) { message.error(e.message) }
+  }
+
+  // 地址栏跟随当前标签页真实 URL（聚焦编辑时不覆盖；about:blank 显示为空）
+  useEffect(() => {
+    if (addrFocused.current) return
+    const t = tabs.find((x) => x.id === target)
+    if (t) setUrl(t.url === 'about:blank' ? '' : t.url)
+  }, [target, tabs])
+
+  // 切换标签：镜像该 tab + 在 Chrome 里把它前置（让 agent 前台焦点一致）
+  const switchTab = (id: string) => {
+    setTarget(id)
+    api('POST', `/browser/tabs/${id}/activate`).catch(() => {})
+  }
+
+  // 作用于当前标签的导航控制
+  const act = async (suffix: string, body?: any) => {
+    if (!target) return
+    try { await api('POST', `/browser/tabs/${target}/${suffix}`, body) }
+    catch (e: any) { message.error(e.message) }
+  }
+
+  // control / quality 变化都要重连（后端按 query 决定输入转发与画质）
+  useEffect(() => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const params = new URLSearchParams()
+    if (control) params.set('control', '1')
+    params.set('q', String(quality))
+    if (target) params.set('target', target)
+    const ws = new WebSocket(`${proto}://${location.host}/api/browser/stream?${params}`)
+    wsRef.current = ws
+    let objURL: string | null = null
+    ws.onopen = () => setConnected(true)
+    ws.onclose = () => setConnected(false)
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data)
+      if (msg.type === 'error') { message.error(msg.msg); return }
+      if (msg.type === 'pong') { setLatency(Math.round(performance.now() - msg.t)); return }
+      if (msg.type === 'frame' && imgRef.current) {
+        sizeRef.current = { w: msg.w || 1280, h: msg.h || 800 }
+        const bytes = atob(msg.data)
+        const arr = new Uint8Array(bytes.length)
+        for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i)
+        bytesRef.current += arr.length
+        framesRef.current++
+        if (objURL) URL.revokeObjectURL(objURL)
+        objURL = URL.createObjectURL(new Blob([arr], { type: 'image/jpeg' }))
+        imgRef.current.src = objURL
+      }
+    }
+    // 每秒打一次 ping 测 RTT，并结算带宽/帧率
+    const ping = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping', t: performance.now() }))
+    }, 1000)
+    const meter = setInterval(() => {
+      setBw(bytesRef.current); setFps(framesRef.current)
+      bytesRef.current = 0; framesRef.current = 0
+    }, 1000)
+    return () => {
+      clearInterval(ping); clearInterval(meter)
+      if (objURL) URL.revokeObjectURL(objURL)
+      ws.close()
+    }
+  }, [control, quality, target])
+
+  const send = (o: any) => {
+    const ws = wsRef.current
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o))
+  }
+
+  const navigate = () => {
+    if (!url) return
+    const u = /^[a-z]+:\/\//i.test(url) ? url : 'https://' + url
+    act('navigate', { url: u })
+  }
+
+  const changeQuality = (v: number) => { setQuality(v); localStorage.setItem(QKEY, String(v)) }
+
+  // 把鼠标坐标换算成 CDP 期望的页面 CSS 像素坐标。
+  // 关键：<img> 用 object-fit: contain，画面在元素框内居中留黑边，
+  // 必须扣掉黑边(letterbox)再按真实显示区缩放，否则点击会整体错位。
+  const mapXY = (e: React.MouseEvent) => {
+    const el = imgRef.current!
+    const r = el.getBoundingClientRect()
+    const nw = el.naturalWidth || sizeRef.current.w
+    const nh = el.naturalHeight || sizeRef.current.h
+    const scale = Math.min(r.width / nw, r.height / nh) // contain 缩放比
+    const dispW = nw * scale, dispH = nh * scale        // 画面实际显示尺寸
+    const padX = (r.width - dispW) / 2                  // 左右黑边
+    const padY = (r.height - dispH) / 2                 // 上下黑边
+    const fx = Math.max(0, Math.min(1, (e.clientX - r.left - padX) / dispW))
+    const fy = Math.max(0, Math.min(1, (e.clientY - r.top - padY) / dispH))
+    // 缩放到 CDP 页面坐标系（设备 CSS 像素）；jpeg 若被降采样，natural < device，故按比例还原
+    return { x: fx * (sizeRef.current.w || nw), y: fy * (sizeRef.current.h || nh) }
+  }
+
+  // CDP 修饰键位掩码：Alt=1 Ctrl=2 Meta=4 Shift=8
+  const mods = (e: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) =>
+    (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0)
+
+  const onMouse = (sub: string) => (e: React.MouseEvent) => {
+    if (!controlRef.current) return
+    e.preventDefault()
+    if (sub === 'down') stageRef.current?.focus() // 拿焦点，键盘事件才进得来
+    send({ type: 'mouse', sub, ...mapXY(e), button: 'left', modifiers: mods(e) })
+  }
+  const onWheel = (e: React.WheelEvent) => {
+    if (!controlRef.current) return
+    send({ type: 'wheel', ...mapXY(e as any), deltaX: e.deltaX, deltaY: e.deltaY, modifiers: mods(e) })
+  }
+  const onKey = (e: React.KeyboardEvent) => {
+    if (!controlRef.current) return
+    e.preventDefault()
+    // 可打印字符（无 Ctrl/Meta 组合）→ insertText；其余 → 特殊键事件
+    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+      send({ type: 'key', sub: 'char', text: e.key })
+      return
+    }
+    send({ type: 'key', sub: 'down', key: e.key, modifiers: mods(e) })
+    send({ type: 'key', sub: 'up', key: e.key, modifiers: mods(e) })
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* 标签栏：左=标签页(自定义固定宽度，切换不易位)，右=接管/清晰度/状态/指标 */}
+      <TabBar
+        tabs={tabs}
+        active={target}
+        onSelect={switchTab}
+        onClose={closeTab}
+        onAdd={newTab}
+        extra={
+          <Space size={10} style={{ paddingRight: 4 }}>
+            <Space size={4}>接管<Switch size="small" checked={control} onChange={setControl} /></Space>
+            <Segmented size="small" options={QUALITY_OPTS} value={quality} onChange={(v) => changeQuality(v as number)} />
+            <Tag color={connected ? 'green' : 'red'} style={{ marginInlineEnd: 0 }}>{connected ? '已连接' : '未连接'}</Tag>
+            <span style={{ color: '#8b949e', fontSize: 12, whiteSpace: 'nowrap' }}>
+              {cell(latency == null ? '—' : latency + 'ms', 48)} ·{cell(fmtRate(bw), 70)} ·{cell(fps + 'fps', 42)}
+            </span>
+          </Space>
+        }
+      />
+      {/* 地址栏：紧凑一行，地址框自适应铺满 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 8px', flex: '0 0 auto' }}>
+        <Button.Group size="small">
+          <Button onClick={() => act('back')} title="后退">←</Button>
+          <Button onClick={() => act('forward')} title="前进">→</Button>
+          <Button onClick={() => act('reload')} title="刷新">⟳</Button>
+        </Button.Group>
+        <Input
+          size="small"
+          placeholder="输入网址回车导航，如 example.com"
+          value={url}
+          style={{ flex: 1 }}
+          onChange={(e) => setUrl(e.target.value)}
+          onFocus={() => { addrFocused.current = true }}
+          onBlur={() => { addrFocused.current = false }}
+          onPressEnter={navigate}
+        />
+        <Button size="small" onClick={navigate}>前往</Button>
+      </div>
+      <div
+        ref={stageRef}
+        tabIndex={0}
+        onKeyDown={onKey}
+        onWheel={onWheel}
+        style={{
+          flex: 1, minHeight: 0, background: '#000', overflow: 'hidden',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          cursor: control ? 'default' : 'not-allowed', outline: 'none',
+        }}
+      >
+        <img
+          ref={imgRef}
+          draggable={false}
+          onMouseDown={onMouse('down')}
+          onMouseUp={onMouse('up')}
+          onMouseMove={onMouse('move')}
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+        />
+      </div>
+    </div>
+  )
+}

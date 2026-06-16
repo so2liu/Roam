@@ -58,6 +58,11 @@ func Handler(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	// 开启该会话的鼠标模式：网页里点击即可切换 tmux 窗格焦点、拖边框可调大小。
+	// 仅作用于该会话（-t name），不影响 CLI 里的其它 tmux。
+	// 滚轮已被前端拦截走 copy-mode，不与此冲突；要本地选中复制可用 Shift+拖拽。
+	_ = exec.Command("tmux", "set-option", "-t", name, "mouse", "on").Run()
+
 	cmd := exec.Command("tmux", "attach", "-t", name)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 	ptmx, err := creackpty.Start(cmd)

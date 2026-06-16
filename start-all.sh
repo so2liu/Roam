@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# start-all.sh — 编译前端 + 启动后端（后端从磁盘提供前端静态文件）
+# start-all.sh — 编译前端 + 后台守护启动后端（脱离终端，关终端/Ctrl-C 不影响）
+#   bash start-all.sh         启动（后台守护，立即返回）
+#   bash start-all.sh stop    停止
+#   bash start-all.sh status  查看状态
+#   bash start-all.sh logs    跟随日志
+#   bash start-all.sh fg      前台运行（调试用，Ctrl-C 即停）
 set -euo pipefail
 cd "$(dirname "$0")"
 export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
@@ -14,22 +19,43 @@ if [ -f .env ]; then
   done < .env
 fi
 
-BIND="${TTMUX_WEB_BIND:-0.0.0.0:8080}"
+BIND="${TTMUX_WEB_BIND:-0.0.0.0:13579}"
 PORT="${BIND##*:}"
 export TTMUX_BIN="${TTMUX_BIN:-$(pwd)/ttmux}"
 export TTMUX_WEB_PASSWORD="${TTMUX_WEB_PASSWORD:-BladeAI2026!!}"
 LAN=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 
-# ── 清理：退出时收掉本脚本启动的子进程（kanna / 后端）────────────
-KANNA_PID=""
-BACKEND_PID=""
-cleanup() {
-  trap - INT TERM HUP EXIT
-  [ -n "$BACKEND_PID" ] && kill "$BACKEND_PID" 2>/dev/null || true
-  [ -n "$KANNA_PID" ]   && kill "$KANNA_PID"   2>/dev/null || true
-  wait 2>/dev/null || true
+LOG="${TTMUX_WEB_LOG:-/tmp/ttmux-web.log}"
+PIDFILE="${TTMUX_WEB_PID:-/tmp/ttmux-web.pid}"
+
+# 找当前监听 PORT 的进程
+port_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null || true
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp "$PORT" 2>/dev/null || true
+  fi
 }
-trap cleanup INT TERM HUP EXIT
+
+# ── 子命令：stop / status / logs ────────────────────────────────
+case "${1:-}" in
+  stop)
+    pids="$(port_pids)"
+    [ -f "$PIDFILE" ] && pids="$pids $(cat "$PIDFILE" 2>/dev/null || true)"
+    pids="$(echo $pids | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+    if [ -z "${pids// /}" ]; then echo "ttmux-web 未在运行"; else
+      echo "==> 停止 ttmux-web ($pids)"
+      kill $pids 2>/dev/null || true; sleep 1; kill -9 $pids 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+    exit 0 ;;
+  status)
+    pids="$(port_pids)"
+    if [ -n "${pids// /}" ]; then echo "ttmux-web 运行中 :$PORT (pid $pids)"; else echo "ttmux-web 未运行"; fi
+    exit 0 ;;
+  logs)
+    exec tail -n 100 -f "$LOG" ;;
+esac
 
 # ── 0. 可选：启动 kanna（Claude Code 精美 UI），并暴露给前端 ─────
 KANNA_PORT="${KANNA_PORT:-3210}"
@@ -37,10 +63,8 @@ if command -v kanna >/dev/null 2>&1; then
   if lsof -ti tcp:"$KANNA_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "==> kanna 已在运行 :$KANNA_PORT"
   else
-    echo "==> 启动 kanna :$KANNA_PORT（局域网可达，口令同控制台）"
-    # 不用 nohup：保持为本脚本的子进程，退出时由 trap 一并收掉
-    kanna --remote --port "$KANNA_PORT" --password "$TTMUX_WEB_PASSWORD" --no-open >/tmp/kanna.log 2>&1 &
-    KANNA_PID=$!
+    echo "==> 启动 kanna :$KANNA_PORT（守护，关终端不影响）"
+    setsid kanna --remote --port "$KANNA_PORT" --password "$TTMUX_WEB_PASSWORD" --no-open </dev/null >/tmp/kanna.log 2>&1 &
     sleep 1
   fi
   export TTMUX_KANNA_URL="${TTMUX_KANNA_URL:-http://${LAN:-127.0.0.1}:$KANNA_PORT}"
@@ -62,14 +86,8 @@ fi
 cd ..
 
 # ── 2. 杀掉旧进程 ───────────────────────────────────────────────
-if command -v lsof >/dev/null 2>&1; then
-  pids=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null || true)
-elif command -v fuser >/dev/null 2>&1; then
-  pids=$(fuser -n tcp "$PORT" 2>/dev/null || true)
-else
-  pids=""
-fi
-if [ -n "$pids" ]; then
+pids="$(port_pids)"
+if [ -n "${pids// /}" ]; then
   echo "==> 杀掉 :$PORT 上的旧进程 ($pids)"
   kill $pids 2>/dev/null || true
   sleep 1
@@ -85,11 +103,20 @@ else
   echo "==> 后端无变更，跳过编译"
 fi
 
-# ── 4. 启动（后端代理 frontend/dist）────────────────────────────
+# ── 4. 启动 ─────────────────────────────────────────────────────
 echo "==> 启动 ttmux-web  http://$BIND  （口令: $TTMUX_WEB_PASSWORD）"
-LAN=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 [ -n "$LAN" ] && echo "==> 手机/平板（同 WiFi）: http://$LAN:$PORT"
-# 不用 exec：后台运行 + wait，这样 Ctrl-C / 退出能触发 trap 清理 kanna 等子进程
-"$BIN" -web "$(pwd)/frontend/dist" -addr "$BIND" "$@" &
-BACKEND_PID=$!
-wait "$BACKEND_PID"
+
+# fg：前台运行（调试，Ctrl-C 即停）
+if [ "${1:-}" = "fg" ]; then
+  shift
+  exec "$BIN" -web "$(pwd)/frontend/dist" -addr "$BIND" "$@"
+fi
+
+# 默认：后台守护。setsid 脱离当前终端会话 → 关终端 / Ctrl-C 都不影响
+setsid "$BIN" -web "$(pwd)/frontend/dist" -addr "$BIND" "$@" </dev/null >>"$LOG" 2>&1 &
+sleep 1
+pids="$(port_pids)"
+[ -n "${pids// /}" ] && echo "$pids" | tr ' ' '\n' | head -1 > "$PIDFILE"
+echo "==> 已后台守护运行（日志: $LOG）"
+echo "    停止: bash start-all.sh stop   状态: bash start-all.sh status   日志: bash start-all.sh logs"

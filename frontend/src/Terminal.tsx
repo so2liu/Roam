@@ -120,22 +120,24 @@ const Term = forwardRef<TermHandle, {
     let acc = 0
     const lineH = () => (termRef.current?.options.fontSize || 13) * 1.3
     const onTS = (e: TouchEvent) => { lastY = e.touches[0].clientY; acc = 0 }
+    // 捕获阶段 + stopPropagation：开了 tmux mouse 后，xterm 会把滚轮/触摸转成
+    // 鼠标事件发给 tmux，与我们的 copy-mode 滚动重复。这里抢先独占，避免双重滚动。
     const onTM = (e: TouchEvent) => {
       const y = e.touches[0].clientY
       acc += (y - lastY) / lineH() // 下滑(dy>0)看更早；上滑看更新
       lastY = y
       const n = Math.trunc(acc)
       if (n !== 0) { acc -= n; sendScroll(n > 0 ? 'up' : 'down', Math.abs(n)) }
-      e.preventDefault()
+      e.preventDefault(); e.stopPropagation()
     }
     const onWheel = (e: WheelEvent) => {
       const n = Math.max(1, Math.round(Math.abs(e.deltaY) / lineH()))
       sendScroll(e.deltaY < 0 ? 'up' : 'down', n)
-      e.preventDefault()
+      e.preventDefault(); e.stopPropagation()
     }
-    el.addEventListener('touchstart', onTS, { passive: true })
-    el.addEventListener('touchmove', onTM, { passive: false })
-    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('touchstart', onTS, { passive: true, capture: true })
+    el.addEventListener('touchmove', onTM, { passive: false, capture: true })
+    el.addEventListener('wheel', onWheel, { passive: false, capture: true })
 
     connect()
 
@@ -144,9 +146,9 @@ const Term = forwardRef<TermHandle, {
       clearTimeout(retry.current)
       ro.disconnect()
       window.removeEventListener('resize', sendResize)
-      el.removeEventListener('touchstart', onTS)
-      el.removeEventListener('touchmove', onTM)
-      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchstart', onTS, { capture: true } as any)
+      el.removeEventListener('touchmove', onTM, { capture: true } as any)
+      el.removeEventListener('wheel', onWheel, { capture: true } as any)
       dataDisp.dispose()
       try { wsRef.current?.close() } catch {}
       term.dispose()

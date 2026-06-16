@@ -10,8 +10,11 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,23 +28,81 @@ const CookieName = "ttmux_session"
 type Auth struct {
 	password  string
 	secret    []byte
+	statePath string // 两步验证状态持久化文件（开关 + 密钥）
 	lockAfter int
 	lockSecs  int
 	ttl       time.Duration
 
 	mu          sync.Mutex
+	totpSecret  string // 两步验证密钥（base32）
+	totpOn      bool   // 是否启用两步验证（UI 可切换，持久化）
 	fails       int
 	lockedUntil time.Time
 }
 
-func New(password string, lockAfter, lockSecs int) *Auth {
-	return &Auth{
+func New(password, totpSecret, statePath string, lockAfter, lockSecs int) *Auth {
+	a := &Auth{
 		password:  password,
 		secret:    randBytes(32),
+		statePath: statePath,
 		lockAfter: lockAfter,
 		lockSecs:  lockSecs,
 		ttl:       7 * 24 * time.Hour,
 	}
+	// 初始种子来自环境变量；若存在状态文件（UI 曾操作过）则以文件为准
+	a.totpSecret = strings.TrimSpace(totpSecret)
+	a.totpOn = a.totpSecret != ""
+	a.loadState()
+	return a
+}
+
+type totpState struct {
+	Secret string `json:"secret"`
+	On     bool   `json:"on"`
+}
+
+func (a *Auth) loadState() {
+	if a.statePath == "" {
+		return
+	}
+	b, err := os.ReadFile(a.statePath)
+	if err != nil {
+		return
+	}
+	var s totpState
+	if json.Unmarshal(b, &s) == nil {
+		a.totpSecret = strings.TrimSpace(s.Secret)
+		a.totpOn = s.On
+	}
+}
+
+func (a *Auth) saveState() {
+	if a.statePath == "" {
+		return
+	}
+	a.mu.Lock()
+	b, _ := json.Marshal(totpState{Secret: a.totpSecret, On: a.totpOn})
+	a.mu.Unlock()
+	_ = os.MkdirAll(filepath.Dir(a.statePath), 0o700)
+	_ = os.WriteFile(a.statePath, b, 0o600)
+}
+
+// TOTPEnabled 是否启用两步验证。
+func (a *Auth) TOTPEnabled() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.totpOn && a.totpSecret != ""
+}
+
+// verifyCode 校验动态码；未启用两步验证时直接放行。
+func (a *Auth) verifyCode(code string) bool {
+	a.mu.Lock()
+	on, s := a.totpOn, a.totpSecret
+	a.mu.Unlock()
+	if !on || s == "" {
+		return true
+	}
+	return verifyTOTP(s, code)
 }
 
 func randBytes(n int) []byte {
@@ -100,13 +161,18 @@ func (a *Auth) Login(c *gin.Context) {
 
 	var body struct {
 		Password string `json:"password"`
+		Code     string `json:"code"` // 两步验证动态码（启用时必填）
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "BAD_REQUEST"}})
 		return
 	}
 
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(a.password)) != 1 {
+	pwOK := subtle.ConstantTimeCompare([]byte(body.Password), []byte(a.password)) == 1
+	// 口令对了但开启了两步验证 → 还要校验动态码
+	codeOK := a.verifyCode(body.Code)
+
+	if !pwOK || !codeOK {
 		a.mu.Lock()
 		a.fails++
 		fails := a.fails
@@ -120,7 +186,12 @@ func (a *Auth) Login(c *gin.Context) {
 			backoff = 3
 		}
 		time.Sleep(time.Duration(backoff) * 300 * time.Millisecond)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "BAD_PASSWORD", "remaining": a.lockAfter - fails}})
+		// 口令正确仅动态码错 → 用 BAD_CODE 让前端聚焦动态码框
+		code := "BAD_PASSWORD"
+		if pwOK && !codeOK {
+			code = "BAD_CODE"
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": code, "remaining": a.lockAfter - fails}})
 		return
 	}
 
@@ -137,5 +208,67 @@ func (a *Auth) Login(c *gin.Context) {
 
 func (a *Auth) Logout(c *gin.Context) {
 	c.SetCookie(CookieName, "", -1, "/", "", false, true)
+	c.JSON(http.StatusOK, gin.H{"data": "ok"})
+}
+
+// PubConfig 公开端点：登录页据此决定是否显示动态码输入框（仅暴露开关，不泄露密钥）。
+func (a *Auth) PubConfig(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"totp": a.TOTPEnabled()}})
+}
+
+// TOTPQR 受保护端点：返回当前状态与已配置密钥的 otpauth 链接（供再次扫码加设备）。
+func (a *Auth) TOTPQR(c *gin.Context) {
+	a.mu.Lock()
+	on, s := a.totpOn && a.totpSecret != "", a.totpSecret
+	a.mu.Unlock()
+	if !on {
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"enabled": false}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"enabled": true,
+		"secret":  s,
+		"uri":     OtpauthURI(s, "ttmux", "admin"),
+	}})
+}
+
+// TOTPGen 受保护端点：生成一个新随机密钥（不持久化），返回二维码链接，供「开启」时扫码确认。
+func (a *Auth) TOTPGen(c *gin.Context) {
+	s := GenerateSecret()
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"secret": s,
+		"uri":    OtpauthURI(s, "ttmux", "admin"),
+		"env":    "TTMUX_WEB_TOTP_SECRET=" + s,
+	}})
+}
+
+// TOTPEnable 受保护端点：用密钥 + 一个有效动态码确认后，启用两步验证并持久化（无需重启）。
+func (a *Auth) TOTPEnable(c *gin.Context) {
+	var b struct {
+		Secret string `json:"secret"`
+		Code   string `json:"code"`
+	}
+	if err := c.ShouldBindJSON(&b); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "BAD_REQUEST"}})
+		return
+	}
+	s := strings.ToUpper(strings.TrimSpace(b.Secret))
+	if s == "" || !verifyTOTP(s, strings.TrimSpace(b.Code)) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": "BAD_CODE", "message": "动态码不正确，请用最新的码再试"}})
+		return
+	}
+	a.mu.Lock()
+	a.totpSecret, a.totpOn = s, true
+	a.mu.Unlock()
+	a.saveState()
+	c.JSON(http.StatusOK, gin.H{"data": "ok"})
+}
+
+// TOTPDisable 受保护端点：关闭两步验证并持久化。
+func (a *Auth) TOTPDisable(c *gin.Context) {
+	a.mu.Lock()
+	a.totpOn = false
+	a.mu.Unlock()
+	a.saveState()
 	c.JSON(http.StatusOK, gin.H{"data": "ok"})
 }

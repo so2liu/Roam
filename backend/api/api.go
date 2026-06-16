@@ -5,6 +5,7 @@ package api
 import (
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -94,6 +95,16 @@ func (a *API) NewSession(c *gin.Context) {
 func (a *API) KillSession(c *gin.Context) { a.text(c, "kill-session", "-t", c.Param("name")) }
 func (a *API) Capture(c *gin.Context) {
 	a.text(c, "capture", c.Param("name"), "--lines", c.DefaultQuery("lines", "200"))
+}
+
+// SessionCwd GET /sessions/:name/cwd —— 返回会话活动 pane 的工作目录（供文件侧栏定位根）。
+func (a *API) SessionCwd(c *gin.Context) {
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", c.Param("name"), "#{pane_current_path}").Output()
+	dir := ""
+	if err == nil {
+		dir = strings.TrimSpace(string(out))
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"dir": dir}})
 }
 
 // Tasks（命令 + Agent 统一）

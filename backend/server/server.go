@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"ttmux-web/api"
 	"ttmux-web/auth"
+	"ttmux-web/browser"
 	"ttmux-web/pty"
 	"ttmux-web/stream"
 	"ttmux-web/ttmux"
@@ -30,6 +31,8 @@ type Config struct {
 	FrontendDir string // frontend/dist 的路径；为空或不存在时用内嵌回退页
 	KannaURL    string // 可选：kanna（Claude Code 精美 UI）地址
 	Password    string
+	TOTPSecret  string // 可选：两步验证密钥（base32）初始种子；UI 可覆盖
+	TOTPState   string // 两步验证状态持久化文件路径
 	LockAfter   int
 	LockSecs    int
 }
@@ -40,13 +43,14 @@ func New(cfg Config) *gin.Engine {
 	r.Use(gin.Recovery())
 
 	tt := ttmux.New(cfg.TTmuxBin)
-	a := auth.New(cfg.Password, cfg.LockAfter, cfg.LockSecs)
+	a := auth.New(cfg.Password, cfg.TOTPSecret, cfg.TOTPState, cfg.LockAfter, cfg.LockSecs)
 	h := api.New(tt, cfg.KannaURL)
 	hub := stream.New(tt, cfg.LogsDir)
 
 	// 公开端点
 	r.POST("/api/login", a.Login)
 	r.POST("/api/logout", a.Logout)
+	r.GET("/api/pubconfig", a.PubConfig) // 登录页据此决定是否要动态码
 
 	// 受保护端点
 	g := r.Group("/api", a.Middleware())
@@ -55,11 +59,19 @@ func New(cfg Config) *gin.Engine {
 		g.GET("/info", h.Info)
 
 		g.GET("/fs", h.FS)
+		g.GET("/files", h.Files)      // 文件侧栏：列目录
+		g.GET("/file", h.File)        // 文件侧栏：读文件
+		g.GET("/file/raw", h.FileRaw) // 文件侧栏：原始字节（图片预览）
 
 		g.GET("/sessions", h.Sessions)
 		g.POST("/sessions", h.NewSession)
 		g.DELETE("/sessions/:name", h.KillSession)
 		g.GET("/sessions/:name/capture", h.Capture)
+		g.GET("/sessions/:name/cwd", h.SessionCwd)                   // 会话工作目录（文件侧栏定位）
+		g.GET("/sessions/:name/claude", h.ClaudeStatus)              // 检测是否在跑 claude
+		g.GET("/sessions/:name/transcript", h.ClaudeTranscript)      // 读 claude 对话记录
+		g.GET("/sessions/:name/codex", h.CodexStatus)                // 检测是否在跑 codex
+		g.GET("/sessions/:name/codex-transcript", h.CodexTranscript) // 读 codex 对话记录
 
 		g.GET("/tasks", h.Tasks)
 		g.POST("/tasks", h.Spawn)
@@ -73,8 +85,22 @@ func New(cfg Config) *gin.Engine {
 		g.DELETE("/env/:key", h.EnvDelete)
 		g.POST("/env/push", h.EnvPush)
 
+		g.GET("/2fa/qr", a.TOTPQR)            // 当前状态 + 密钥二维码
+		g.GET("/2fa/gen", a.TOTPGen)          // 生成新密钥（开启前扫码用）
+		g.POST("/2fa/enable", a.TOTPEnable)   // 确认动态码后开启
+		g.POST("/2fa/disable", a.TOTPDisable) // 关闭
+
 		// 实时通道
 		g.GET("/term/:name", pty.Handler)
+		g.GET("/browser/stream", browser.Handler) // 镜像全局 Chrome 画面
+		g.GET("/browser/tabs", browser.Tabs)      // 标签页：列出
+		g.POST("/browser/tabs", browser.NewTab)   // 标签页：新建
+		g.DELETE("/browser/tabs/:id", browser.CloseTab)
+		g.POST("/browser/tabs/:id/back", browser.TabBack)         // 后退
+		g.POST("/browser/tabs/:id/forward", browser.TabForward)   // 前进
+		g.POST("/browser/tabs/:id/reload", browser.TabReload)     // 刷新
+		g.POST("/browser/tabs/:id/activate", browser.TabActivate) // 在 Chrome 里前置
+		g.POST("/browser/tabs/:id/navigate", browser.TabNavigate) // 导航到 URL
 		g.GET("/stream/status", hub.Status)
 		g.GET("/logs/:name", hub.Logs)
 	}
