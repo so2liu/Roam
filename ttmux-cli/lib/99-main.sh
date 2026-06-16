@@ -278,6 +278,13 @@ case "$cmd" in
                 [[ "${1:-}" == "--json" ]] && fmt="json"
                 _swarm_collect "$local_swarm" "$fmt"
                 ;;
+            activate)
+                if [[ $# -lt 1 ]]; then
+                    msg_err "用法: ttmux swarm activate <群> [成员]"
+                    exit 1
+                fi
+                _swarm_activate "$@"
+                ;;
             adopt)
                 if [[ $# -lt 1 ]]; then
                     msg_err "用法: ttmux swarm adopt <群> [--by <cc会话>]"
@@ -299,7 +306,7 @@ case "$cmd" in
                 ;;
             *)
                 msg_err "未知子命令: swarm ${subcmd}"
-                echo -e "   可用: new, add, ls, status, collect, adopt, done, archive, rm"
+                echo -e "   可用: new, add, ls, status, activate, collect, adopt, done, archive, rm"
                 exit 1
                 ;;
         esac

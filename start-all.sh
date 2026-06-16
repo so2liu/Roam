@@ -20,6 +20,17 @@ export TTMUX_BIN="${TTMUX_BIN:-$(pwd)/ttmux}"
 export TTMUX_WEB_PASSWORD="${TTMUX_WEB_PASSWORD:-BladeAI2026!!}"
 LAN=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 
+# ── 清理：退出时收掉本脚本启动的子进程（kanna / 后端）────────────
+KANNA_PID=""
+BACKEND_PID=""
+cleanup() {
+  trap - INT TERM HUP EXIT
+  [ -n "$BACKEND_PID" ] && kill "$BACKEND_PID" 2>/dev/null || true
+  [ -n "$KANNA_PID" ]   && kill "$KANNA_PID"   2>/dev/null || true
+  wait 2>/dev/null || true
+}
+trap cleanup INT TERM HUP EXIT
+
 # ── 0. 可选：启动 kanna（Claude Code 精美 UI），并暴露给前端 ─────
 KANNA_PORT="${KANNA_PORT:-3210}"
 if command -v kanna >/dev/null 2>&1; then
@@ -27,7 +38,9 @@ if command -v kanna >/dev/null 2>&1; then
     echo "==> kanna 已在运行 :$KANNA_PORT"
   else
     echo "==> 启动 kanna :$KANNA_PORT（局域网可达，口令同控制台）"
-    nohup kanna --remote --port "$KANNA_PORT" --password "$TTMUX_WEB_PASSWORD" --no-open >/tmp/kanna.log 2>&1 &
+    # 不用 nohup：保持为本脚本的子进程，退出时由 trap 一并收掉
+    kanna --remote --port "$KANNA_PORT" --password "$TTMUX_WEB_PASSWORD" --no-open >/tmp/kanna.log 2>&1 &
+    KANNA_PID=$!
     sleep 1
   fi
   export TTMUX_KANNA_URL="${TTMUX_KANNA_URL:-http://${LAN:-127.0.0.1}:$KANNA_PORT}"
@@ -76,4 +89,7 @@ fi
 echo "==> 启动 ttmux-web  http://$BIND  （口令: $TTMUX_WEB_PASSWORD）"
 LAN=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
 [ -n "$LAN" ] && echo "==> 手机/平板（同 WiFi）: http://$LAN:$PORT"
-exec "$BIN" -web "$(pwd)/frontend/dist" -addr "$BIND" "$@"
+# 不用 exec：后台运行 + wait，这样 Ctrl-C / 退出能触发 trap 清理 kanna 等子进程
+"$BIN" -web "$(pwd)/frontend/dist" -addr "$BIND" "$@" &
+BACKEND_PID=$!
+wait "$BACKEND_PID"

@@ -42,6 +42,127 @@ _swarm_dep_set() {
     printf '%s\n' "$3" > "${dir}/${2}.txt"
 }
 
+# ── 依赖门控：pending 成员存储 + 解锁 ──
+#
+# 有依赖且依赖未满足的成员不立即 spawn，而是挂起为 pending：
+#   ${TTMUX_SWARMS}/<群>/pending/<成员>/{type,payload,workdir,model,perm}.txt
+# 依赖满足后由 _swarm_activate 取出 spec 真正 spawn 并清除 pending。
+
+_swarm_pending_root() { echo "$(_swarm_dir "$1")/pending"; }
+_swarm_pending_dir()  { echo "$(_swarm_dir "$1")/pending/${2}"; }
+
+# _swarm_pending_set <群> <成员> <type> <payload> <workdir> <model> <perm>
+_swarm_pending_set() {
+    local d; d=$(_swarm_pending_dir "$1" "$2")
+    mkdir -p "$d"
+    printf '%s\n' "$3" > "${d}/type.txt"
+    printf '%s\n' "$4" > "${d}/payload.txt"
+    printf '%s\n' "$5" > "${d}/workdir.txt"
+    printf '%s\n' "$6" > "${d}/model.txt"
+    printf '%s\n' "$7" > "${d}/perm.txt"
+}
+_swarm_pending_clear() { rm -rf "$(_swarm_pending_dir "$1" "$2")"; }
+
+# 列出 pending 成员名（每行一个）
+_swarm_pending_list() {
+    local root; root=$(_swarm_pending_root "$1")
+    [[ -d "$root" ]] || return 0
+    shopt -s nullglob
+    local d
+    for d in "$root"/*/; do basename "$d"; done
+}
+
+# 成员是否已完成（用于依赖解锁）：会话已退出(pane_dead)或已消失但跑过(有日志)。
+# 仍 pending（从未 spawn、无日志）的成员 -> 未完成。
+_swarm_member_done() {
+    local sess="${1}-${2}"
+    if _session_exists "$sess"; then
+        local dead
+        dead=$("$TMUX_BIN" display-message -t "$sess" -p '#{pane_dead}' 2>/dev/null || echo 0)
+        [[ "$dead" == "1" ]]
+    else
+        [[ -f "${TTMUX_LOGS}/${sess}.log" ]]
+    fi
+}
+
+# 某成员的依赖是否全部满足（空依赖视为满足）
+_swarm_deps_satisfied() {
+    local swarm="$1" member="$2" deps d
+    deps=$(_swarm_dep_get "$swarm" "$member")
+    [[ -n "$deps" ]] || return 0
+    local IFS=','
+    for d in $deps; do
+        d="${d#"${d%%[![:space:]]*}"}"; d="${d%"${d##*[![:space:]]}"}"   # trim
+        [[ -n "$d" ]] || continue
+        _swarm_member_done "$swarm" "$d" || return 1
+    done
+    return 0
+}
+
+# 取出 pending spec 并真正 spawn 一个成员
+_swarm_spawn_pending() {
+    local swarm="$1" member="$2"
+    local d; d=$(_swarm_pending_dir "$swarm" "$member")
+    local type payload workdir model perm
+    type=$(cat "${d}/type.txt" 2>/dev/null)
+    payload=$(cat "${d}/payload.txt" 2>/dev/null)
+    workdir=$(cat "${d}/workdir.txt" 2>/dev/null)
+    model=$(cat "${d}/model.txt" 2>/dev/null)
+    perm=$(cat "${d}/perm.txt" 2>/dev/null)
+    if [[ "$type" == "agent" ]]; then
+        _agent_defaults
+        AGENT_WORKDIR="$workdir"
+        [[ -n "$model" ]] && AGENT_MODEL="$model"
+        [[ -n "$perm" ]]  && AGENT_PERMISSION="$perm"
+    fi
+    _spawn_one "$swarm" "$member" "$type" "$payload" "$workdir"
+}
+
+# ttmux swarm activate <群> [成员] [--quiet]
+# 扫描 pending 成员，依赖已满足的真正启动；级联解锁直到无新增。
+_swarm_activate() {
+    local swarm="$1"; shift || true
+    if ! _swarm_exists "$swarm"; then msg_err "蜂群不存在: ${swarm}"; return 1; fi
+    local only="" quiet=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quiet) quiet=1; shift ;;
+            *) only="$1"; shift ;;
+        esac
+    done
+    local total_launched=0 changed=1
+    while (( changed )); do
+        changed=0
+        local m
+        while IFS= read -r m; do
+            [[ -n "$m" ]] || continue
+            [[ -n "$only" && "$m" != "$only" ]] && continue
+            if _swarm_deps_satisfied "$swarm" "$m"; then
+                if _swarm_spawn_pending "$swarm" "$m"; then
+                    _swarm_pending_clear "$swarm" "$m"
+                    ((total_launched++)) || true
+                    changed=1
+                    [[ -z "$quiet" ]] && msg_ok "解锁成员 ${bold}${m}${reset} ${dim}(依赖已满足)${reset}"
+                fi
+            fi
+        done < <(_swarm_pending_list "$swarm")
+        [[ -n "$only" ]] && break   # 指定单成员时不级联
+    done
+    if [[ -z "$quiet" ]]; then
+        if (( total_launched > 0 )); then
+            _swarm_meta_set "$swarm" status "running"
+        else
+            local rest; rest=$(_swarm_pending_list "$swarm" | grep -c . || true)
+            if (( rest > 0 )); then
+                msg_info "无可解锁成员 ${dim}(还有 ${rest} 个在等依赖)${reset}"
+            else
+                msg_info "没有挂起的成员"
+            fi
+        fi
+    fi
+    return 0
+}
+
 # ── 命令 ──
 
 # ttmux swarm new <名> [--goal "..."]
@@ -102,6 +223,19 @@ _swarm_add() {
         return 1
     fi
 
+    # 记录依赖（供 status 展示 + 门控判断）
+    [[ -n "$deps" ]] && _swarm_dep_set "$swarm" "$member" "$deps"
+
+    # 依赖门控：有依赖且未满足 -> 挂起为 pending，不立即 spawn
+    if [[ -n "$deps" ]] && ! _swarm_deps_satisfied "$swarm" "$member"; then
+        _swarm_pending_set "$swarm" "$member" "$type" "$payload" "$workdir" "$model" "$perm"
+        _swarm_meta_set "$swarm" status "running"
+        local suffix=""; (( ${#payload} > 60 )) && suffix="..."
+        msg_info "成员 ${bold}${member}${reset} (${type}) ${yellow}已挂起${reset}: ${dim}${payload:0:60}${suffix}${reset}"
+        echo -e "   ${dim}等待依赖完成: ${deps}  (依赖满足后自动解锁，或 ttmux swarm activate ${swarm})${reset}"
+        return 0
+    fi
+
     # agent 成员: 设置 AGENT_* 供 _agent_claude_cmd 使用
     if [[ "$type" == "agent" ]]; then
         AGENT_WORKDIR="$workdir"
@@ -111,11 +245,10 @@ _swarm_add() {
 
     # 成员 = 任务组 <swarm> 的会话；底层类型 agent 走 claude，task 走 shell
     if _spawn_one "$swarm" "$member" "$type" "$payload" "$workdir"; then
-        [[ -n "$deps" ]] && _swarm_dep_set "$swarm" "$member" "$deps"
         _swarm_meta_set "$swarm" status "running"
         local suffix=""; (( ${#payload} > 60 )) && suffix="..."
         msg_ok "成员 ${bold}${member}${reset} (${type}): ${dim}${payload:0:60}${suffix}${reset}"
-        [[ -n "$deps" ]] && echo -e "   ${dim}依赖: ${deps}${reset}"
+        [[ -n "$deps" ]] && echo -e "   ${dim}依赖: ${deps} (已满足)${reset}"
         return 0
     fi
     return 1
@@ -150,7 +283,9 @@ _swarm_ls() {
             archived)    st_str="${dim}archived${reset}" ;;
             *)           st_str="${dim}${status:-planning}${reset}" ;;
         esac
-        echo -e "   ${icon_group} ${bold}${name}${reset}  ${dim}${alive}/${total} 活跃${reset}  ${st_str}$( [[ -n "$sup" ]] && echo "  ${magenta}◆${sup}${reset}" )"
+        local pend; pend=$(_swarm_pending_list "$name" | grep -c . || true)
+        local pend_str=""; (( pend > 0 )) && pend_str="  ${yellow}+${pend}待解锁${reset}"
+        echo -e "   ${icon_group} ${bold}${name}${reset}  ${dim}${alive}/${total} 活跃${reset}${pend_str}  ${st_str}$( [[ -n "$sup" ]] && echo "  ${magenta}◆${sup}${reset}" )"
         [[ -n "$goal" ]] && echo -e "       ${dim}${goal}${reset}"
     done
     echo ""
@@ -160,6 +295,8 @@ _swarm_ls() {
 _swarm_status() {
     local name="$1"
     if ! _swarm_exists "$name"; then msg_err "蜂群不存在: ${name}"; return 1; fi
+    # 巡检/查看顺手解锁依赖已满足的 pending 成员（静默）
+    _swarm_activate "$name" --quiet >/dev/null 2>&1 || true
     local goal status sup created
     goal=$(_swarm_meta_get "$name" goal)
     status=$(_swarm_meta_get "$name" status)
@@ -181,9 +318,19 @@ _swarm_status() {
     # 复用任务组状态(逐会话 running/done)；还没有成员时不报错
     if _group_exists "$name"; then
         _status "$name" || true
-    else
+    elif [[ -z "$(_swarm_pending_list "$name")" ]]; then
         echo -e "    ${dim}(还没有成员，用 a) 加成员)${reset}"
     fi
+    # 挂起(pending)成员：等依赖解锁
+    local p first=1
+    while IFS= read -r p; do
+        [[ -n "$p" ]] || continue
+        if (( first )); then
+            echo -e "  ${dim}── 挂起(等依赖) ──${reset}"
+            first=0
+        fi
+        echo -e "  ${yellow}${icon_run:-⏳}${reset} ${bold}${name}-${p}${reset} ${yellow}挂起${reset}  ${dim}依赖→ $(_swarm_dep_get "$name" "$p")${reset}"
+    done < <(_swarm_pending_list "$name")
     return 0
 }
 
@@ -391,14 +538,16 @@ _interactive_swarm_detail() {
         echo ""
         echo -e "  ${bold}蜂群 ${swarm} ─ 成员管理${reset}"
         echo -e "    ${cyan}a${reset}) 加成员            ${cyan}m${reset}) 追加指令"
-        echo -e "    ${cyan}c${reset}) 等待并收集        ${cyan}k${reset}) 清理整群"
-        echo -e "    ${cyan}d${reset}) cc 接管           ${cyan}b${reset}) 返回上层"
+        echo -e "    ${cyan}u${reset}) 解锁挂起成员      ${cyan}c${reset}) 等待并收集"
+        echo -e "    ${cyan}d${reset}) cc 接管           ${cyan}k${reset}) 清理整群"
+        echo -e "    ${cyan}b${reset}) 返回上层"
         echo ""
         read -r -p "  选择: " act </dev/tty
         echo ""
         case "$act" in
             a) _interactive_swarm_add_member "$swarm" || true; _interactive_pause ;;
             m) _interactive_swarm_send "$swarm" || true; _interactive_pause ;;
+            u) _swarm_activate "$swarm" || true; _interactive_pause ;;
             c) _do_wait_group "$swarm" 300 || true; echo ""; _swarm_collect "$swarm" text || true; _interactive_pause ;;
             k)
                 if _confirm "清理整群 ${bold}${swarm}${reset} (杀全部成员会话)?"; then

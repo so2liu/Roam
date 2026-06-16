@@ -11,7 +11,7 @@ _ttmux_completions() {
     local cur prev cmds
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    cmds="ls new a attach d detach kill killall rename nw lw kw sp split kp send info source help spawn group capture wait collect status completion agent"
+    cmds="ls new a attach d detach kill killall rename nw lw kw sp split kp send info source help spawn group capture wait collect status completion agent swarm"
 
     case "$prev" in
         ttmux)
@@ -27,6 +27,14 @@ _ttmux_completions() {
             return ;;
         agent)
             COMPREPLY=($(compgen -W "spawn status send collect kill" -- "$cur"))
+            return ;;
+        swarm)
+            COMPREPLY=($(compgen -W "new add ls status activate collect adopt done archive rm" -- "$cur"))
+            return ;;
+        adopt|activate)
+            local swarms
+            swarms=$(ls -d ~/.local/share/ttmux/swarms/*/ 2>/dev/null | xargs -I{} basename {})
+            COMPREPLY=($(compgen -W "$swarms" -- "$cur"))
             return ;;
         sp|split)
             COMPREPLY=($(compgen -W "-h -v" -- "$cur"))

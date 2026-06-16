@@ -37,7 +37,8 @@ show_help() {
     ${green}swarm add${reset}    ${dim}<群> <成员> --type task|agent ...${reset}  加成员
                 ${dim}[--dir/--perm/--model] [--depends-on a,b] <命令或任务>${reset}
     ${green}swarm ls${reset}                                列出蜂群 (目标/状态/指挥)
-    ${green}swarm status${reset} ${dim}<群>${reset}                    成员状态 + 依赖
+    ${green}swarm status${reset} ${dim}<群>${reset}                    成员状态 + 依赖 + 挂起
+    ${green}swarm activate${reset} ${dim}<群> [成员]${reset}            解锁依赖已满足的挂起成员
     ${green}swarm collect${reset} ${dim}<群> [--json]${reset}          收集成员输出
     ${green}swarm adopt${reset}  ${dim}<群> [--by <cc会话>]${reset}     cc 接管 (拉起指挥会话)
     ${green}swarm done${reset}|${green}archive${reset}|${green}rm${reset} ${dim}<群>${reset}        完成 / 归档 / 删除
