@@ -97,23 +97,9 @@ func cmdlineHasClaude(pid int) bool {
 	return strings.Contains(cl, "claude") && !strings.Contains(cl, "claude-code-webui")
 }
 
-// treeMatch 从 pid 起 DFS 子进程树，任一进程命中 match 即返回 true。
-func treeMatch(pid int, children map[int][]int, depth int, match func(int) bool) bool {
-	if depth > 12 {
-		return false
-	}
-	if match(pid) {
-		return true
-	}
-	for _, ch := range children[pid] {
-		if treeMatch(ch, children, depth+1, match) {
-			return true
-		}
-	}
-	return false
-}
-
-// paneToolDir 返回会话中进程树命中 match（某交互式 CLI）的 pane 的工作目录；没有则返回 ""。
+// paneToolDir 返回会话中主进程命中 match（某交互式 CLI）的 pane 的工作目录；没有则返回 ""。
+// 只检查 pane 自身 PID 及其直接子进程（用户启动的主进程），不递归孙进程，
+// 避免误命中主进程内部启动的子服务（如 Claude 启动的 codex mcp-server）。
 func paneToolDir(name string, match func(int) bool) string {
 	out, err := exec.Command("tmux", "list-panes", "-t", name, "-F", "#{pane_pid}\t#{pane_current_path}").Output()
 	if err != nil {
@@ -129,8 +115,13 @@ func paneToolDir(name string, match func(int) bool) string {
 		if err != nil {
 			continue
 		}
-		if treeMatch(pid, children, 0, match) {
+		if match(pid) {
 			return parts[1]
+		}
+		for _, ch := range children[pid] {
+			if match(ch) {
+				return parts[1]
+			}
 		}
 	}
 	return ""
