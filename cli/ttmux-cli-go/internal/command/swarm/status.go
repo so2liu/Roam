@@ -29,6 +29,9 @@ func cmdStatusText(rt runtime.Runtime, st *swarmcore.Store, name string, w io.Wr
 	if stt.Goal != "" {
 		fmt.Fprintf(w, "    %s目标:%s %s\n", p.Dim, p.Reset, stt.Goal)
 	}
+	if stt.Dir != "" {
+		fmt.Fprintf(w, "    %s目录:%s %s\n", p.Dim, p.Reset, stt.Dir)
+	}
 	if stt.Supervisor != "" {
 		fmt.Fprintf(w, "    %s指挥:%s %s%s%s\n", p.Dim, p.Reset, p.Magenta, stt.Supervisor, p.Reset)
 	}

@@ -429,6 +429,12 @@ function tailLine(raw: string): string {
   return (lines[lines.length - 1] || '').slice(0, 90)
 }
 
+// 目录规整：去尾斜杠 + 折叠重复斜杠，用于蜂群 dir 与项目 dir 的等值比较
+function normDir(p: string): string {
+  const s = String(p || '').trim().replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+  return s
+}
+
 // ── P2 项目主页：头部 + composer(hero) + 任务流/Worktree/编队/活动 ──
 function ProjectHome({ proj, allProjects, loaded, openTerm, closeTerm, refresh }: {
   proj?: Proj; allProjects: Proj[]; loaded: boolean; openTerm: (n: string) => void; closeTerm: (n: string) => void; refresh: () => void
@@ -581,7 +587,11 @@ function ProjectHome({ proj, allProjects, loaded, openTerm, closeTerm, refresh }
     const claimedByDeeper = (c: string) => deeper.some((d) => c === d || c.startsWith(d + '/'))
     return sessions.filter((s) => !ann[s.name]?.primary?.repo && under(s.cwd) && !claimedByDeeper(s.cwd))
   }, [sessions, ann, dir, isGit, allProjects])
-  // 蜂群归属（08 §2.2）：swarm ls 无 dir 字段——按「指挥/成员会话 ∈ 本项目会话」现算
+  // 蜂群归属（08 §2.2）：两条判据取并集
+  //  1) 蜂群自报的工作目录 dir == 本项目目录（swarm new/adopt --dir 落库，CLI 建的群靠这条）
+  //  2) 「指挥/成员会话 ∈ 本项目会话」现算（老蜂群没有 dir，保留兼容）
+  // 光靠 2) 不够：项目会话来自 ttmux ls --json，而它按设计过滤掉所有蜂群会话，
+  // 于是 CLI 建的群 inProj 恒为 0、永远不显示（issue #125）。
   const mineKey = useMemo(() => mine.map((s) => s.name).sort().join('\n'), [mine])
   useEffect(() => {
     if (!isGit) return
@@ -590,6 +600,7 @@ function ProjectHome({ proj, allProjects, loaded, openTerm, closeTerm, refresh }
       try {
         const list = await api('GET', '/swarms')
         const names = new Set(mineKey.split('\n').filter(Boolean))
+        const here = normDir(dir)
         const active = (Array.isArray(list) ? list : []).filter((s: any) => s.status !== 'archived')
         const out: any[] = []
         await Promise.all(active.map(async (sw: any) => {
@@ -597,7 +608,12 @@ function ProjectHome({ proj, allProjects, loaded, openTerm, closeTerm, refresh }
             const st = await api('GET', `/swarms/${encodeURIComponent(sw.name)}`)
             const members = (st?.members || []) as any[]
             const inProj = members.filter((m: any) => names.has(m.session)).length + (st?.supervisor && names.has(st.supervisor) ? 1 : 0)
-            if (inProj > 0) out.push({ ...sw, inProj, roster: members.length + (st?.supervisor ? 1 : 0), supervisor: st?.supervisor || '', members })
+            const swDir = normDir(sw.dir || st?.dir || '')
+            const byDir = !!here && !!swDir && swDir === here
+            const roster = members.length + (st?.supervisor ? 1 : 0)
+            // 认了 dir 的群，整支班子都算本项目的：它的会话本来就被 ls 过滤掉了，
+            // 按会话数算会显示成 0/N 且每行都标「跨项目」。
+            if (inProj > 0 || byDir) out.push({ ...sw, inProj: byDir ? roster : inProj, byDir, roster, supervisor: st?.supervisor || '', members })
           } catch {}
         }))
         if (!stop) setSwarms(out.sort((a, b) => String(a.name).localeCompare(String(b.name))))
@@ -606,7 +622,7 @@ function ProjectHome({ proj, allProjects, loaded, openTerm, closeTerm, refresh }
     loadSwarms()
     const i = setInterval(loadSwarms, 10000)
     return () => { stop = true; clearInterval(i) }
-  }, [isGit, mineKey])
+  }, [isGit, mineKey, dir])
   // Agent 运行标注 + 待输入检测（仅本项目会话，量小）
   useEffect(() => {
     let stop = false
@@ -1151,7 +1167,8 @@ function ProjectHome({ proj, allProjects, loaded, openTerm, closeTerm, refresh }
             const ex = swarmExtras[sw.name]
             const mineNames = new Set(mine.map((x) => x.name))
             const memberRow = (session: string, role: string, subrole?: string, done?: boolean, status?: string) => {
-              const inProj = mineNames.has(session)
+              // 按 dir 认领的群：成员会话不在 ls 清单里（被蜂群过滤挡掉），但确实属于本项目
+              const inProj = mineNames.has(session) || !!sw.byDir
               const running = cc[session] || cx[session] || status === 'running'
               return (
                 <div key={session} className="prj-subrow" style={{ opacity: inProj ? 1 : 0.45 }}

@@ -93,19 +93,21 @@ swarm task rm     <群> <卡id>
 ### 4.2 给 `swarm ls` / `swarm status` 加 `--json`
 
 现 `_swarm_ls` / `_swarm_status` 只有彩色文本；web 列表/详情需要结构化。新增：
-- `swarm ls --json` → `[{name,id,goal,status,supervisor,created,total,alive,pending}]`
-- `swarm status <群> --json` → `{name,goal,status,supervisor,created, members:[{name,type,task,status,done,pending,deps}], pending:[...], done_marked:[...]}`
+- `swarm ls --json` → `[{name,id,goal,status,supervisor,created,dir,total,alive,pending}]`
+- `swarm status <群> --json` → `{name,goal,status,supervisor,created,dir, members:[{name,type,task,status,done,pending,deps}], pending:[...], done_marked:[...]}`
   成员存活/状态复用既有 `_status_json`（`status.sh`）或 `_group_sessions` + `_session_exists` 拼装。
+  `dir` = 蜂群工作目录（绝对路径，可空），`swarm new/adopt --dir` 落库。项目视图按它把蜂群
+  归到项目——不能只靠成员会话名，因为 `ttmux ls --json` 按设计会过滤掉所有蜂群会话（issue #125）。
 
 ### 4.3 JSON 契约（前后端共识，字段名定死）
 
 ```jsonc
 // GET /api/swarms            ← swarm ls --json
 [{"name":"login","id":"2026-0616-1356-aqzq","goal":"加登录","status":"running",
-  "supervisor":"cc-login","total":3,"alive":2,"pending":1}]
+  "supervisor":"cc-login","dir":"/home/me/codes/app","total":3,"alive":2,"pending":1}]
 
 // GET /api/swarms/:n         ← swarm status :n --json
-{"name":"login","goal":"...","status":"running","supervisor":"cc-login",
+{"name":"login","goal":"...","status":"running","supervisor":"cc-login","dir":"/home/me/codes/app",
  "members":[{"name":"api","type":"agent","task":"实现登录API","status":"running","done":0,"deps":""}],
  "pending":[{"name":"web","deps":"api"}], "done_marked":["api"]}
 

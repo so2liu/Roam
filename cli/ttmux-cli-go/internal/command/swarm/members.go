@@ -66,6 +66,11 @@ func adopt(rt runtime.Runtime, st *swarmcore.Store, swarm, cc, dir, prompt strin
 	if cc == "" {
 		cc = "cc-" + st.Name(swarm)
 	}
+	// 显式给了 --dir 就记进 meta：Web 项目视图按 dir 把蜂群归到项目(issue #125)。
+	// 没给就保持原值不动，避免 adopt 一次把建群时记的目录抹掉。
+	if abs := absDir(dir); abs != "" {
+		_ = st.MetaSet(swarm, "dir", abs)
+	}
 	if dir == "" {
 		dir = "."
 	}
@@ -110,7 +115,9 @@ func cmdAdopt(rt runtime.Runtime, st *swarmcore.Store, args []string, w io.Write
 		return fmt.Errorf("usage: ttmux swarm adopt <name> [--by <session>] [--dir <dir>] [--prompt <text>]")
 	}
 	swarm := args[0]
-	cc, dir, prompt := "", ".", ""
+	// dir 留空表示「没给 --dir」（adopt 内部再退回 "."），这样才分得清
+	// 「显式指定目录」和「沿用默认」，只有前者才写进 meta.dir
+	cc, dir, prompt := "", "", ""
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--by":
@@ -131,6 +138,7 @@ type swarmListItem struct {
 	Status     string `json:"status"`
 	Supervisor string `json:"supervisor"`
 	Created    string `json:"created"`
+	Dir        string `json:"dir"` // 工作目录(绝对路径, 可空)：Web 按它把蜂群归到项目
 	Total      int    `json:"total"`
 	Alive      int    `json:"alive"`
 	Pending    int    `json:"pending"`
@@ -148,7 +156,7 @@ func cmdList(rt runtime.Runtime, st *swarmcore.Store, args []string, w io.Writer
 			total, alive := groupCounts(rt, s.Name)
 			items = append(items, swarmListItem{
 				ID: s.ID, Name: s.Name, Goal: s.Goal, Status: s.Status,
-				Supervisor: s.Supervisor, Created: s.Created,
+				Supervisor: s.Supervisor, Created: s.Created, Dir: s.Dir,
 				Total: total, Alive: alive, Pending: st.PendingCount(s.Name),
 			})
 		}

@@ -23,11 +23,13 @@ type MemberSpec struct {
 
 // SwarmRow is one swarm in the registry listing.
 type SwarmRow struct {
-	ID, Name, Goal, Status, Supervisor, Created string
+	ID, Name, Goal, Status, Supervisor, Created, Dir string
 }
 
 // NewSwarm inserts a planning swarm and initializes its db. Returns the id.
-func (s *Store) NewSwarm(name, goal string) (string, error) {
+// dir 是蜂群的工作目录(绝对路径, 可空)——Web 项目视图按它把蜂群归到项目，
+// 不能只靠成员会话名(ls --json 会把蜂群会话过滤掉，见 issue #125)。
+func (s *Store) NewSwarm(name, goal, dir string) (string, error) {
 	if err := s.MetaInit(); err != nil {
 		return "", err
 	}
@@ -37,8 +39,8 @@ func (s *Store) NewSwarm(name, goal string) (string, error) {
 	}
 	defer db.Close()
 	id := s.NewID()
-	_, err = db.Exec(`INSERT INTO swarms(id,name,goal,status,supervisor,created)
-		VALUES(?,?,?,'planning','',?)`, id, name, goal, s.opt.Now().Format("2006-01-02 15:04:05"))
+	_, err = db.Exec(`INSERT INTO swarms(id,name,goal,status,supervisor,created,dir)
+		VALUES(?,?,?,'planning','',?,?)`, id, name, goal, s.opt.Now().Format("2006-01-02 15:04:05"), dir)
 	if err != nil {
 		return "", err
 	}
@@ -60,7 +62,7 @@ func (s *Store) ListSwarms() ([]SwarmRow, error) {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT id,name,IFNULL(goal,''),IFNULL(status,''),IFNULL(supervisor,''),IFNULL(created,'') FROM swarms ORDER BY created`)
+	rows, err := db.Query(`SELECT id,name,IFNULL(goal,''),IFNULL(status,''),IFNULL(supervisor,''),IFNULL(created,''),IFNULL(dir,'') FROM swarms ORDER BY created`)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +70,7 @@ func (s *Store) ListSwarms() ([]SwarmRow, error) {
 	var out []SwarmRow
 	for rows.Next() {
 		var r SwarmRow
-		if err := rows.Scan(&r.ID, &r.Name, &r.Goal, &r.Status, &r.Supervisor, &r.Created); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Goal, &r.Status, &r.Supervisor, &r.Created, &r.Dir); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

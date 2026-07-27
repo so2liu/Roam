@@ -28,6 +28,7 @@ type SwarmStatus struct {
 	Status         string         `json:"status"`
 	Supervisor     string         `json:"supervisor"`
 	Created        string         `json:"created"`
+	Dir            string         `json:"dir"` // 工作目录(绝对路径, 可空)：Web 按它把蜂群归到项目
 	LeaderLastPost int64          `json:"leader_last_post"`
 	Members        []SwarmMember  `json:"members"`
 	Pending        []SwarmPending `json:"pending"`
@@ -60,6 +61,7 @@ type swarmMeta struct {
 	Status     string
 	Supervisor string
 	Created    string
+	Dir        string
 }
 
 func DefaultOptions() Options {
@@ -214,6 +216,10 @@ func Status(name string, opt Options) (*SwarmStatus, error) {
 		return nil, err
 	}
 	defer metaDB.Close()
+	// 老库没有 dir 列：读之前补一次(幂等)，否则 findSwarm 的 SELECT 会整条失败
+	if err := migrateMetaDB(metaDB); err != nil {
+		return nil, err
+	}
 
 	meta, err := findSwarm(metaDB, name)
 	if err != nil {
@@ -234,6 +240,7 @@ func Status(name string, opt Options) (*SwarmStatus, error) {
 		Status:         meta.Status,
 		Supervisor:     meta.Supervisor,
 		Created:        meta.Created,
+		Dir:            meta.Dir,
 		LeaderLastPost: readLeaderLastPost(opt.HomeDir, meta.ID),
 		Members:        []SwarmMember{},
 		Pending:        []SwarmPending{},
@@ -312,13 +319,32 @@ func openSQLite(path string) (*sql.DB, error) {
 
 func findSwarm(db *sql.DB, name string) (swarmMeta, error) {
 	var m swarmMeta
-	err := db.QueryRow(`SELECT id, name, IFNULL(goal,''), IFNULL(status,''), IFNULL(supervisor,''), IFNULL(created,'')
+	err := db.QueryRow(`SELECT id, name, IFNULL(goal,''), IFNULL(status,''), IFNULL(supervisor,''), IFNULL(created,''), IFNULL(dir,'')
 		FROM swarms WHERE name=? OR id=? LIMIT 1`, name, name).
-		Scan(&m.ID, &m.Name, &m.Goal, &m.Status, &m.Supervisor, &m.Created)
+		Scan(&m.ID, &m.Name, &m.Goal, &m.Status, &m.Supervisor, &m.Created, &m.Dir)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, fmt.Errorf("swarm not found: %s", name)
 	}
 	return m, err
+}
+
+// migrateMetaDB brings an existing meta.db up to the current swarms schema.
+// Only additive column migrations live here, so it is idempotent and safe to
+// run on every open: a column that already exists is simply skipped, and a
+// failing ALTER (read-only db, racing writer) degrades to the old behaviour
+// instead of breaking the read path.
+func migrateMetaDB(db *sql.DB) error {
+	cols, err := tableColumns(db, "swarms")
+	if err != nil {
+		return err
+	}
+	if !cols["dir"] {
+		if _, err := db.Exec(`ALTER TABLE swarms ADD COLUMN dir TEXT`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }
 
 func migrateSwarmDB(db *sql.DB) error {

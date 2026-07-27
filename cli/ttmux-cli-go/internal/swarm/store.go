@@ -56,10 +56,12 @@ func (s *Store) MetaInit() error {
 		return err
 	}
 	defer db.Close()
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS swarms(
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS swarms(
 		id TEXT PRIMARY KEY, name TEXT UNIQUE, goal TEXT,
-		status TEXT, supervisor TEXT, created TEXT)`)
-	return err
+		status TEXT, supervisor TEXT, created TEXT, dir TEXT)`); err != nil {
+		return err
+	}
+	return migrateMetaDB(db)
 }
 
 // ResolveID maps a name-or-id to its id ("" if unknown).
@@ -122,7 +124,7 @@ func (s *Store) MetaSet(nameOrID, col, val string) error {
 // metaCol whitelists the swarm columns to keep MetaGet/Set injection-safe.
 func metaCol(col string) string {
 	switch col {
-	case "goal", "status", "supervisor", "created", "name", "id":
+	case "goal", "status", "supervisor", "created", "name", "id", "dir":
 		return col
 	}
 	return "status"

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"ttmux-cli-go/internal/command/group"
@@ -136,7 +137,16 @@ func cmdNew(rt runtime.Runtime, st *swarmcore.Store, args []string, w io.Writer)
 	if dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	id, err := st.NewSwarm(name, goal)
+	// 绝对路径入库：Web 项目视图按 dir 归属蜂群(issue #125)，相对路径跨进程无意义
+	dirAbs := absDir(dir)
+	if dirAbs == "" && stdinIsTTY() {
+		// 人(或终端里的 agent)直接 `swarm new` 没给 --dir：Leader 就地在当前目录
+		// 起，那当前目录就是这个蜂群的工作目录，记下来 Web 才归得了项目。
+		// 后端(web)调 CLI 时 stdin 是管道，不走这条——否则会把服务进程的 cwd
+		// 当成蜂群目录，归到一个八竿子打不着的项目上。
+		dirAbs, _ = os.Getwd()
+	}
+	id, err := st.NewSwarm(name, goal, dirAbs)
 	if err != nil {
 		return err
 	}
@@ -355,6 +365,26 @@ func cmdRemove(rt runtime.Runtime, st *swarmcore.Store, args []string, w io.Writ
 	}
 	ui.Ok(w, "蜂群 %s 已删除", ui.Bold(name))
 	return nil
+}
+
+// absDir 把 --dir 规整成绝对路径（空值/"." 视为未指定，返回 ""）——落库的目录
+// 要能被 Web 端跟项目目录直接比对，相对路径取决于 CLI 当时的 cwd，没法比。
+func absDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" || dir == "." {
+		return ""
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
+}
+
+// stdinIsTTY 判断 CLI 是不是人在终端里跑（后端转发时 stdin 是管道）。
+func stdinIsTTY() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func next(args []string, i int) (string, int) {
