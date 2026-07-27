@@ -218,6 +218,7 @@ const zhCN = {
   'chat.reasoning': '推理',
   'chat.tool': '工具',
   'chat.todoCount': '{count} 项待办',
+  'chat.askMultiSelect': '多选',
   'prompt.confirmRequired': '需要你确认',
   'prompt.yes': '是 (y)',
   'prompt.no': '否 (n)',

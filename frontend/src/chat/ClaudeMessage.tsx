@@ -28,11 +28,43 @@ function toolHead(name: string | undefined, o: any, t: (key: string, vars?: Reco
     case 'TodoWrite': return { icon: '☑', title: t('chat.todoCount', { count: (o?.todos || []).length }) }
     case 'WebFetch': return { icon: '🌐', title: clip(s(o?.url)) }
     case 'WebSearch': return { icon: '🌐', title: clip(s(o?.query)) }
+    case 'AskUserQuestion': {
+      const qs = Array.isArray(o?.questions) ? o.questions : []
+      const more = qs.length > 1 ? ` (+${qs.length - 1})` : ''
+      return { icon: '❓', title: clip(s(qs[0]?.question)) + more }
+    }
     default: {
       const key = o && ['command', 'file_path', 'path', 'pattern', 'query', 'prompt', 'description'].find((k) => o[k])
       return { icon: '⚙', title: clip(key ? s(o[key]) : (o ? JSON.stringify(o) : '')) }
     }
   }
+}
+
+// AskUserQuestion：每个问题一张卡片，列出候选项（纯展示，不回传选择）
+function AskQuestions({ questions }: { questions: any[] }) {
+  const { t } = useI18n()
+  return (
+    <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {questions.map((q: any, i: number) => (
+        <div key={i} style={{ border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-base)', padding: '6px 8px', fontSize: 12.5, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+            {q?.header && <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>{String(q.header)}</span>}
+            <span style={{ color: 'var(--text-bright)', fontWeight: 600 }}>{String(q?.question || '')}</span>
+            {q?.multiSelect === true && <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>{t('chat.askMultiSelect')}</span>}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {(Array.isArray(q?.options) ? q.options : []).map((op: any, j: number) => (
+              <div key={j} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <span style={{ color: 'var(--text-bright)', fontWeight: 600 }}>{String(op?.label ?? '')}</span>
+                {op?.description && <span style={{ color: 'var(--text-dim)' }}>{String(op.description)}</span>}
+                {op?.preview && <CodeBox text={String(op.preview)} max={220} />}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 // 工具调用的「详情体」：按工具类型展开有用信息
@@ -61,6 +93,7 @@ function ToolBody({ name, o, raw }: { name?: string; o: any; raw?: string }) {
   }
   if (name === 'Task') return <CodeBox text={o?.prompt || ''} max={260} />
   if (name === 'WebFetch') return <CodeBox text={o?.prompt || o?.url || ''} max={160} />
+  if (name === 'AskUserQuestion' && Array.isArray(o?.questions)) return <AskQuestions questions={o.questions} />
   const pretty = o ? JSON.stringify(o, null, 2) : (raw || '')
   return pretty ? <CodeBox text={pretty} /> : null
 }

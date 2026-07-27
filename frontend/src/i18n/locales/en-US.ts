@@ -218,6 +218,7 @@ const enUS = {
   'chat.reasoning': 'Reasoning',
   'chat.tool': 'Tool',
   'chat.todoCount': '{count} todo item(s)',
+  'chat.askMultiSelect': 'Multi-select',
   'prompt.confirmRequired': 'Confirmation required',
   'prompt.yes': 'Yes (y)',
   'prompt.no': 'No (n)',
