@@ -9,11 +9,17 @@ import (
 	"strconv"
 	"strings"
 
+	"ttmux-cli-go/internal/id"
 	"ttmux-cli-go/internal/runtime"
 )
 
 type sessionInfo struct {
-	Name         string `json:"name"`
+	Name string `json:"name"`
+	// ID 可读会话 id（2026-0728-1150-0142）：由 session_created + session_id 派生，
+	// 与 TmuxID 一一对应、改名不变，是对外展示口径。
+	ID string `json:"id,omitempty"`
+	// TmuxID 原始 #{session_id}（$142）：内部键（meta.db 主键、session-homes 的键）。
+	TmuxID       string `json:"tmux_id,omitempty"`
 	Windows      int    `json:"windows"`
 	Created      string `json:"created"`
 	Attached     int    `json:"attached"`
@@ -32,7 +38,7 @@ func ListJSON(rt runtime.Runtime, exclude map[string]bool, w io.Writer) error {
 	// window_activity 补上 session_activity 的盲区：tmux 只在 attach/输入/焦点变化时
 	// 刷新 session_activity,后台无人 attach 的会话即便一直有输出(agent 干活)也不动;
 	// window_activity 会随前台窗口的 pane 输出走。取两者较大值 = 真正的「最近活跃」。
-	out, err := rt.TmuxOutput("list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}\t#{session_activity}\t#{window_activity}")
+	out, err := rt.TmuxOutput("list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}\t#{session_activity}\t#{window_activity}\t#{session_id}")
 	if err != nil {
 		// tmux server 未启动时输出的是 stderr 错误文本（out 非空），只看 err
 		_, _ = io.WriteString(w, "[]\n")
@@ -59,8 +65,15 @@ func ListJSON(rt runtime.Runtime, exclude map[string]bool, w io.Writer) error {
 		if len(parts) > 5 {
 			lastActivity = maxNumeric(lastActivity, parts[5]) // max(session_activity, window_activity)
 		}
+		tmuxID := ""
+		if len(parts) > 6 {
+			tmuxID = parts[6]
+		}
+		created, _ := strconv.ParseInt(parts[2], 10, 64)
 		sessions = append(sessions, sessionInfo{
 			Name:         parts[0],
+			ID:           id.ForSession(created, tmuxID),
+			TmuxID:       tmuxID,
 			Windows:      windows,
 			Created:      parts[2],
 			Attached:     attached,

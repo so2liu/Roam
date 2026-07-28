@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"ttmux-cli-go/internal/id"
 	"ttmux-cli-go/internal/runtime"
 	"ttmux-cli-go/internal/ui"
 )
@@ -16,7 +17,9 @@ import (
 // List renders the human-readable session table (mirrors _pretty_sessions),
 // hiding swarm-owned sessions via exclude.
 func List(rt runtime.Runtime, exclude map[string]bool, w io.Writer) error {
-	out, err := rt.TmuxOutput("list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}")
+	// 名字后跟会话 id：由 tmux 的 session_created + session_id 派生成可读格式
+	// （2026-0728-1150-0142，与项目/蜂群 id 同款），底层仍是 session_id。
+	out, err := rt.TmuxOutput("list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}\t#{session_id}")
 	if err != nil {
 		// tmux server 未启动时输出的是 stderr 错误文本，不能当会话数据解析
 		out = ""
@@ -44,8 +47,13 @@ func List(rt runtime.Runtime, exclude map[string]bool, w io.Writer) error {
 		if sec, err := strconv.ParseInt(parts[2], 10, 64); err == nil {
 			ts = time.Unix(sec, 0).Format("01-02 15:04")
 		}
+		label := ui.Bold(name)
+		if len(parts) > 4 && parts[4] != "" {
+			created, _ := strconv.ParseInt(parts[2], 10, 64)
+			label += p.Dim + "(" + id.ForSession(created, parts[4]) + ")" + p.Reset
+		}
 		fmt.Fprintf(w, "   %s %s  %s%s 个窗口  %s%s  %s\n",
-			ui.IconSession, ui.Bold(name), p.Dim, parts[1], ts, p.Reset, att)
+			ui.IconSession, label, p.Dim, parts[1], ts, p.Reset, att)
 		count++
 	}
 	if count == 0 {

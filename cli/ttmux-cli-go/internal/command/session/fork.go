@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
+	"ttmux-cli-go/internal/id"
 	"ttmux-cli-go/internal/runtime"
 	"ttmux-cli-go/internal/sessmeta"
 	"ttmux-cli-go/internal/ui"
@@ -171,7 +173,11 @@ func ParentCmd(rt runtime.Runtime, meta *sessmeta.Store, args []string, w io.Wri
 }
 
 type treeNode struct {
-	Name         string      `json:"name"`
+	Name string `json:"name"`
+	// ID 可读会话 id（派生自 session_created + session_id，展示口径）；
+	// TmuxID 是原始 $142（内部键：meta.db 主键、session-homes 的键）。
+	ID           string      `json:"id,omitempty"`
+	TmuxID       string      `json:"tmux_id,omitempty"`
 	Windows      int         `json:"windows"`
 	Created      string      `json:"created"`
 	Attached     int         `json:"attached"`
@@ -206,7 +212,11 @@ func Tree(rt runtime.Runtime, meta *sessmeta.Store, exclude map[string]bool, w i
 		if prefix == "" {
 			branch, next = "", "   "
 		}
-		fmt.Fprintf(w, "%s%s%s  %s\n", prefix, branch, ui.Bold(n.Name), ui.Dim(n.Cwd))
+		label := ui.Bold(n.Name)
+		if n.ID != "" {
+			label += ui.Dim("(" + n.ID + ")")
+		}
+		fmt.Fprintf(w, "%s%s%s  %s\n", prefix, branch, label, ui.Dim(n.Cwd))
 		for i, c := range n.Children {
 			walk(c, next, i == len(n.Children)-1)
 		}
@@ -224,7 +234,7 @@ func buildTree(rt runtime.Runtime, meta *sessmeta.Store, exclude map[string]bool
 
 	// 会话基础信息（一次 list-sessions）
 	// window_activity 补 session_activity 盲区（后台有输出但无人 attach 时不动),取较大值。
-	out, _ := rt.TmuxOutput("list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}\t#{session_activity}\t#{window_activity}")
+	out, _ := rt.TmuxOutput("list-sessions", "-F", "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}\t#{session_activity}\t#{window_activity}\t#{session_id}")
 	nodes := map[string]*treeNode{}
 	var order []string
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -240,6 +250,11 @@ func buildTree(rt runtime.Runtime, meta *sessmeta.Store, exclude map[string]bool
 		}
 		if len(parts) > 5 {
 			n.LastActivity = maxNumeric(n.LastActivity, parts[5])
+		}
+		if len(parts) > 6 {
+			created, _ := strconv.ParseInt(parts[2], 10, 64)
+			n.TmuxID = parts[6]
+			n.ID = id.ForSession(created, parts[6])
 		}
 		nodes[n.Name] = n
 		order = append(order, n.Name)
