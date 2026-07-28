@@ -580,12 +580,15 @@ function ProjectHome({ proj, allProjects, loaded, openTerm, closeTerm, refresh }
     // 而不是只取 P1 卡片的 top(≤2)——否则该项目的第 3+ 个会话在详情页永远不出现。
     // 已被某 git 仓库认领的会话(annotation 有 primary.repo)排除，避免嵌套 git 子项目
     // 的会话重复挂到非 git 父目录下。
+    // 归属看会话钉死的 home 目录（annotation.home），不是实时 cwd：在会话里 cd 出去
+    // 不该让它掉出项目。后端没给 home（老后端/刚起的会话）才退回 ls 的实时 cwd。
+    const homeOf = (s: any) => ann[s.name]?.home || s.cwd
     const under = (c: string) => !!c && (c === dir || c.startsWith(dir + '/'))
     // 同一会话归最深(最长前缀)的非 git 项目：排除落在更具体的非 git 兄弟项目里的会话，
     // 与后端最长前缀口径一致，否则父项目详情页会把子项目会话重复计入（外层少、里层多）。
     const deeper = allProjects.filter((p) => !p.git && p.dir !== dir && p.dir.startsWith(dir + '/')).map((p) => p.dir)
     const claimedByDeeper = (c: string) => deeper.some((d) => c === d || c.startsWith(d + '/'))
-    return sessions.filter((s) => !ann[s.name]?.primary?.repo && under(s.cwd) && !claimedByDeeper(s.cwd))
+    return sessions.filter((s) => !ann[s.name]?.primary?.repo && under(homeOf(s)) && !claimedByDeeper(homeOf(s)))
   }, [sessions, ann, dir, isGit, allProjects])
   // 蜂群归属（08 §2.2）：两条判据取并集
   //  1) 蜂群自报的工作目录 dir == 本项目目录（swarm new/adopt --dir 落库，CLI 建的群靠这条）

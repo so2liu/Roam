@@ -31,10 +31,11 @@
 
 **不是**「顶层会话 = 项目」：顶层会话可关闭、可多开；目录才是稳定容器。项目**不与 git
 绑定**：任意目录都可以是项目（目录 + 会话）；目录是 git 仓库时归位 canonical 主仓库根，
-并开启 worktree / 编队 / 活动 等 git 能力。非 git 项目的会话归属按 pane cwd 目录前缀
-现算（git 项目按 §2.4 annotation，更精确、优先认领）。
+并开启 worktree / 编队 / 活动 等 git 能力。非 git 项目的会话归属按会话**归属目录
+（home，07 §2.4）**做目录前缀匹配（git 项目按 annotation 的 primary repo，更精确、优先
+认领）。归属在建会话时钉死，用户在终端里 cd 到别处不会让会话掉出项目。
 
-- **发现 = 现算 ∪ 弱台账**：项目列表 = 「全部会话 pane cwd join（07 §2.4）∪ knownRepos
+- **发现 = 现算 ∪ 弱台账**：项目列表 = 「全部会话 home join（07 §2.4）∪ knownRepos
   逐仓库 worktree 扫描」。repo 身份 = canonical common-dir（07 §2.3 规则不变）。
   **不能只靠会话现算**：现有 `GET /git/worktrees/all` 只枚举「当前会话触达的仓库」，
   仓库最后一个会话关掉后，留着未合并提交的孤儿 worktree 就没有任何来源能再发现它——
@@ -45,11 +46,11 @@
     校验并归位主仓库根，非 git 目录拒绝。**永不自动退场**，只能 `DELETE /projects/:key`
     显式移除（纯台账操作，不动目录/worktree/会话）。开 session、建 feature 是进项目
     之后 composer 的事，创建项目本身不建任何会话。
-  - **发现（origin=discovered）**：会话 cwd join 命中即自动记入；移出仅当 **(a)** 仓库
+  - **发现（origin=discovered）**：会话 home join 命中即自动记入；移出仅当 **(a)** 仓库
     目录已不存在，或 **(b)** 不存在任何 roam worktree（clean/已合并未清理的也算存在）
     **且**无会话**且**未置顶。同文件顺带存 UI 偏好（置顶、默认 agent/base、自定显示名）。
   git/session 真相源不变；台账丢失只损失「零会话仓库的可发现性」，活跃仓库下次开会话即重建。
-- cwd 不在任何 git 仓库的会话 → 「散会话」区，保留原会话语义，不强造项目。
+- home 不在任何项目/git 仓库里的会话 → 「散会话」区，保留原会话语义，不强造项目。
 
 ### 2.2 任务 = 会话 ∪ 孤儿 worktree 的统一投影（读模型，非新实体）
 
@@ -131,8 +132,7 @@
     「待集成」，worktree 合并建议走蜂群台集成验收；若在 P3 单独收尾，提示
     「该 worktree 属蜂群 <名>」。跨仓库成员在本项目置灰只留跳转，防双处操作。
 - **worktree × 命令行（P4）**：一个 worktree 下可挂多条命令行——agent 会话与裸 shell 同列
-  （挂靠 = cwd join 实况：cd 走自动离组、cd 进自动入列；多 pane 命中多 worktree 显 ⚠ 歧义
-  标记，hover 列全部 matches）。行内终端尾行预览只读（capture-pane，懒加载）；
+  （挂靠 = 会话 home：在哪建的就挂哪，之后 cd 不改挂靠——见 07 §2.4 归属钉死）。行内终端尾行预览只读（capture-pane，懒加载）；
   「＋ 新开命令行」三选：shell = `ttmux new --dir <worktree>`（命名 `<分支>-sh` 自动后缀），
   Claude/Codex = `POST /worktree-sessions`「已有」档——孤儿复活与外部收编是同一动作的特例。
   「进入」→ 停靠终端（手机全屏），工具栏面包屑 `项目 › ⎇ 分支 › 命令行`；worktree 删除按钮
@@ -143,7 +143,7 @@
 
 | 接口 | 说明 |
 |---|---|
-| `GET /projects` | 聚合：knownRepos（§2.1 台账）逐仓库 worktree 扫描 + `ttmux ls --tree` cwd join（顺带把新命中的仓库记入发现通道）+ races 计数 + 最近活动（worktree HEAD 时间的 max）|
+| `GET /projects` | 聚合：knownRepos（§2.1 台账）逐仓库 worktree 扫描 + `ttmux ls --tree` home join（顺带把新命中的仓库记入发现通道）+ races 计数 + 最近活动（worktree HEAD 时间的 max）|
 | `POST /projects` | 显式创建项目对象（origin=user，永不自动退场）；`{dir, displayName?}`，非 git 目录报 `NOT_GIT_REPO` |
 | `DELETE /projects/:key` | 显式移除（纯台账，不动目录/worktree/会话；有会话的仓库会被发现通道重新记入——列表反映实况）|
 | `GET /projects/:repoKey` | 单仓库详情：任务投影（§2.2）+ worktree 列表 + races + 活动流（各 worktree `git log --since` 汇总 + 收尾留痕，带缓存）|
@@ -165,7 +165,7 @@ action: merged|discarded|cleaned, strategy?, shortstat, at}`），只增不改�
 
 ```
 backend/
-  worktree/service.go     已有：git 领域服务（repo 锁 / 3s list 缓存 / pane cwd join）
+  worktree/service.go     已有：git 领域服务（repo 锁 / 3s list 缓存 / 会话 home join）
   api/worktree.go         已有：handler + 组合编排（worktree-sessions / fork / close-with-worktree）
   api/race.go             已有：RaceStore（<dataDir>/races.json，互斥+整写）+ crown 状态机
   project/service.go      新增：发现聚合 + knownRepos 台账 + 收尾留痕读写

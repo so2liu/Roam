@@ -97,7 +97,8 @@ func (a *API) ProjectsList(c *gin.Context) {
 	}
 	ann := a.WT.Annotations(ctx)
 
-	// 发现：会话 cwd join 命中的仓库自动记入台账（读路径副作用，无注册流程）
+	// 发现：会话归属目录(home，见 worktree/sessionhome.go)命中的仓库自动记入台账
+	// （读路径副作用，无注册流程）。归属钉死在建会话时的目录，用户 cd 走不改归属。
 	for _, an := range ann {
 		if an.Primary != nil && an.Primary.Repo != "" {
 			a.Projects.Touch(an.Primary.Repo)
@@ -229,7 +230,7 @@ func (a *API) ProjectsList(c *gin.Context) {
 		finish(&p, top)
 	}
 
-	// 非 git 项目：pane cwd 目录前缀认领未归属会话。同一会话归**最深(最长前缀)**
+	// 非 git 项目：按会话 home 目录前缀认领未归属会话。同一会话归**最深(最长前缀)**
 	// 的非 git 项目——嵌套目录(父/子都是非 git 项目，如 /codes 与 /codes/tmp)不能按
 	// map 迭代序抢占，否则父项目先跑就把子目录会话抢走，计数在父/子间随机漂移
 	// （详情页各按自身 dir 认领无此去重，于是子项目外层 0、里层 1）。对齐 worktree

@@ -132,6 +132,7 @@ func (a *API) RaceCreate(c *gin.Context) {
 			fail("session: " + ttmux.StripANSI(out))
 			continue
 		}
+		a.WT.BindSessionHome(ct.Session, b.Dir) // 选手会话归属本仓库；cdInto 之后改钉到各自 worktree
 		wt, err := a.WT.Create(ctx, worktree.CreateReq{Dir: b.Dir, Branch: autoBranch(b.Name) + "-" + letter, Base: b.Base})
 		if err != nil {
 			_, _ = a.TT.Run("kill", ct.Session, "--yes")

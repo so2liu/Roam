@@ -28,7 +28,7 @@ type API struct {
 }
 
 func New(tt *ttmux.Client, browserHome, dataDir string) *API {
-	return &API{TT: tt, WT: worktree.New(), BrowserHome: browserHome, Football: NewFootballStore(), Speech: NewSpeechStore(dataDir), Prefs: NewPreferencesStore(dataDir), Races: NewRaceStore(dataDir), Projects: project.NewStore(dataDir)}
+	return &API{TT: tt, WT: worktree.New(dataDir), BrowserHome: browserHome, Football: NewFootballStore(), Speech: NewSpeechStore(dataDir), Prefs: NewPreferencesStore(dataDir), Races: NewRaceStore(dataDir), Projects: project.NewStore(dataDir)}
 }
 
 // json 透传 ttmux 的 --json 输出
@@ -123,6 +123,9 @@ func (a *API) NewSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "TTMUX_ERROR", "message": ttmux.StripANSI(out)}})
 		return
 	}
+	// 在哪个目录建的，就永远属于那个项目——之后终端里 cd 去哪都不改归属。
+	// （不等轮询采样才钉：新会话头几秒就 cd 走的话会钉错。）
+	a.WT.BindSessionHome(b.Name, strings.TrimSpace(b.Dir))
 	c.JSON(http.StatusOK, gin.H{"data": ttmux.StripANSI(out), "name": b.Name})
 }
 
@@ -151,15 +154,18 @@ func (a *API) RenameSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "TTMUX_ERROR", "message": ttmux.StripANSI(out)}})
 		return
 	}
+	a.WT.RenameSessionHome(oldName, newName) // 归属跟着新名字走，改名不掉出项目
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"name": newName}})
 }
 
 // 走 ttmux kill --yes（非交互）：孤儿收养/meta 清理在 CLI 内完成；?cascade=1 级联杀子树。
 func (a *API) KillSession(c *gin.Context) {
-	args := []string{"kill", sessionParam(c), "--yes"}
+	name := sessionParam(c)
+	args := []string{"kill", name, "--yes"}
 	if c.Query("cascade") == "1" {
 		args = append(args, "--cascade")
 	}
+	a.WT.ForgetSessionHome(name) // 同名会话重建不继承旧归属（级联杀掉的子会话由 reconcile 收敛）
 	a.text(c, args...)
 }
 func (a *API) Capture(c *gin.Context) {
