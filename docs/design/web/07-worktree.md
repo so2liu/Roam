@@ -121,11 +121,14 @@ ttmux 的能力止步于「平坦 tmux session + parent 关系」，**不理解 
 - **ahead/behind 相对已记录的 `roam.baseRef`**，区分 `committedAhead`（未合并到 base 的提交——不是"未推送"）、`dirty`、`untracked` 三个数。
 - **diff 定义**：`mergeBase = git merge-base <baseRef> HEAD`；已提交差异 = `git diff mergeBase..HEAD`；未提交改动**另算** workingTree diff，两个数字不混。文件统计 `--numstat -z`，rename/binary 结构化表达。
 
-### 2.4 session ↔ worktree：cwd join 读模型（上层现算，不写台账）
+### 2.4 session ↔ worktree：home join 读模型（归属钉死，状态现算）
 
-- 上层读 `ttmux ls/inspect` 的**全部 pane cwd**（保留 session+window+pane），与 `git worktree list` 做 join：路径先 canonical（`EvalSymlinks`+clean），按**路径段边界**做「最长 worktree root 前缀」匹配。
-- 返回 `matches[]` + `primary`（active pane）+ `ambiguous` 标记——一个 session 多 pane 可命中多个 worktree，不硬写 session→单对象；UI 对歧义显式标记。
-- Worktree 可无 session（孤儿/外部）；session 可在普通目录；关系随 cd 实时变化，这是特性。
+- **归属目录（home）钉死**：会话创建时就记下它属于哪个目录（Web 建会话/建 worktree 会话/竞赛/fork 都显式绑定；CLI 直建的会话第一次被看见时按 active pane cwd 钉），落 `<dataDir>/session-homes.json`，会话消失即收敛、改名跟着迁移。
+  > 修订（原设计按**实时** pane cwd 现算归属）：cd 是终端里的日常动作，不是「换项目」。实时归属会让会话在用户 `cd /tmp` 看眼日志时就掉出项目——项目会话数掉 0、详情页任务流空、甚至被别的项目抢走。归属改为钉死，**只有编排层的移动（cdInto）才改归属**。
+- join 本身不变：home 路径 canonical（`EvalSymlinks`+clean）后与 `git worktree list` 按**路径段边界**做「最长 worktree root 前缀」匹配。
+- `annotations` 返回 `home` + `primary`（home 命中的 worktree/repo）+ `matches[]`（现为单元素）；`ambiguous` 保留为兼容字段，恒 false。
+- 分支/dirty/worktree 状态仍按 home 目录**现算**——在 home 里切分支照样实时反映；只有「属于谁」不再漂。
+- Worktree 可无 session（孤儿/外部）；session 的 home 可以是普通目录（非 git，则按目录前缀归属非 git 项目）。
 
 生命周期五步，每步都有对应界面（§3）：
 

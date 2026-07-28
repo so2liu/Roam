@@ -48,6 +48,7 @@ type Service struct {
 	mu     sync.Mutex
 	cache  map[string]listCache   // key: commonDir
 	remote map[string]remoteState // key: commonDir（Sync 的远端观测，进程内缓存）
+	homes  *homeStore             // session → 钉死的归属目录（见 sessionhome.go）
 }
 
 type listCache struct {
@@ -63,8 +64,9 @@ type remoteState struct {
 	heads map[string]bool
 }
 
-func New() *Service {
-	return &Service{cache: map[string]listCache{}, remote: map[string]remoteState{}}
+// New 建服务；dataDir 为空表示不持久化会话归属（测试用），生产由 api.New 传入。
+func New(dataDir string) *Service {
+	return &Service{cache: map[string]listCache{}, remote: map[string]remoteState{}, homes: newHomeStore(dataDir)}
 }
 
 const listCacheTTL = 3 * time.Second
@@ -683,7 +685,8 @@ func underPath(p, root string) bool {
 func (s *Service) joinSessions(ctx context.Context, list []Worktree) []Worktree {
 	out := make([]Worktree, len(list))
 	copy(out, list)
-	panes := tmuxPanes(ctx)
+	// 按会话钉死的 home 目录归属（不是实时 pane cwd）：cd 走了也还挂在原 worktree 下。
+	panes := homePanes(s.sessionHomes(ctx))
 	for i := range out {
 		out[i].Sessions = nil
 	}
@@ -715,9 +718,10 @@ func (s *Service) joinSessions(ctx context.Context, list []Worktree) []Worktree 
 // ── Annotations（跨仓库：session → worktree 归属）─────────
 
 type Annotation struct {
+	Home      string          `json:"home"` // 会话钉死的归属目录（非 git 项目按它做前缀归属）
 	Primary   *AnnotationHit  `json:"primary,omitempty"`
 	Matches   []AnnotationHit `json:"matches"`
-	Ambiguous bool            `json:"ambiguous"`
+	Ambiguous bool            `json:"ambiguous"` // 保留字段：归属已钉死为单一 home，恒 false
 }
 
 type AnnotationHit struct {
@@ -779,12 +783,12 @@ type RepoWorktrees struct {
 	Worktrees []Worktree `json:"worktrees"`
 }
 
-// ListAll 汇总当前全部会话（pane cwd）触达的仓库的 worktree 清单——W4 跨仓库总览。
-// 仓库集合来自 cwd join（5s 缓存），逐仓库 List（3s 缓存），单仓库失败跳过不拖累整体。
+// ListAll 汇总当前全部会话（归属目录）触达的仓库的 worktree 清单——W4 跨仓库总览。
+// 仓库集合来自 home join（5s 缓存），逐仓库 List（3s 缓存），单仓库失败跳过不拖累整体。
 func (s *Service) ListAll(ctx context.Context) []RepoWorktrees {
 	seen := map[string]bool{}
 	var repos []string
-	for _, p := range tmuxPanes(ctx) {
+	for _, p := range homePanes(s.sessionHomes(ctx)) {
 		hit := resolveCwd(ctx, p.Cwd)
 		if hit == nil || hit.Repo == "" || seen[hit.Repo] {
 			continue
@@ -804,50 +808,31 @@ func (s *Service) ListAll(ctx context.Context) []RepoWorktrees {
 	return out
 }
 
-// SessionCwds 全部会话的 pane cwd 快照（canonical）。供非 git 项目按目录
-// 前缀归属会话（08：项目不与 git 绑定，git 只是可选能力）。
+// SessionCwds 全部会话的**归属目录**快照（canonical，每会话一条）。供非 git 项目
+// 按目录前缀归属会话（08：项目不与 git 绑定，git 只是可选能力）。
+// 这里刻意不给实时 pane cwd：会话 cd 出去不该换项目（见 sessionhome.go）。
 func (s *Service) SessionCwds(ctx context.Context) map[string][]string {
 	out := map[string][]string{}
-	for _, p := range tmuxPanes(ctx) {
-		out[p.Session] = append(out[p.Session], canonical(p.Cwd))
+	for sess, home := range s.sessionHomes(ctx) {
+		out[sess] = []string{home}
 	}
 	return out
 }
 
-// Annotations 返回 {session → {primary, matches[], ambiguous}}。
+// Annotations 返回 {session → {home, primary, matches[]}}。
+// 归属按会话钉死的 home 目录现算：分支/worktree 状态实时（home 里切分支照样变），
+// 但「属于哪个仓库/worktree」不随 pane cwd 漂移。非 git 的 home 也会给出条目
+// （只有 home 字段），让非 git 项目也能按前缀认领会话。
 func (s *Service) Annotations(ctx context.Context) map[string]*Annotation {
 	res := map[string]*Annotation{}
-	for _, p := range tmuxPanes(ctx) {
-		hit := resolveCwd(ctx, p.Cwd)
-		if hit == nil {
-			continue
-		}
-		a := res[p.Session]
-		if a == nil {
-			a = &Annotation{}
-			res[p.Session] = a
-		}
-		dup := false
-		for _, m := range a.Matches {
-			if m.Worktree == hit.Worktree {
-				dup = true
-				break
-			}
-		}
-		if !dup {
-			a.Matches = append(a.Matches, *hit)
-		}
-		if p.Active {
+	for sess, home := range s.sessionHomes(ctx) {
+		a := &Annotation{Home: home, Matches: []AnnotationHit{}}
+		if hit := resolveCwd(ctx, home); hit != nil {
 			h := *hit
 			a.Primary = &h
+			a.Matches = append(a.Matches, h)
 		}
-	}
-	for _, a := range res {
-		a.Ambiguous = len(a.Matches) > 1
-		if a.Primary == nil && len(a.Matches) > 0 {
-			h := a.Matches[0]
-			a.Primary = &h
-		}
+		res[sess] = a
 	}
 	return res
 }

@@ -293,6 +293,9 @@ func shellQuote(s string) string {
 // 键入先于前端随后发送的 agent 启动指令，shell 按序执行，且 cd 留在回滚里可见。
 // pane 目标必须写 =name:（精确会话+缺省窗口）：tmux 3.4 send-keys 对裸 =name 报 can't find pane。
 func (a *API) cdInto(session, path string) error {
+	// 编排层把会话挪进某目录 = 它以后属于那儿（建 worktree 会话/竞赛/派生都走这里）。
+	// 归属钉死后不再随用户在终端里的 cd 漂移。
+	a.WT.BindSessionHome(session, path)
 	if _, err := a.TT.Run("send-keys", "-t", "="+session+":", "-l", "cd "+shellQuote(path)); err != nil {
 		return err
 	}
@@ -322,6 +325,7 @@ func (a *API) WorktreeSessionCreate(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "SESSION_FAILED", "message": ttmux.StripANSI(out)}})
 		return
 	}
+	a.WT.BindSessionHome(b.Name, b.Dir) // 先钉在仓库上；worktree 建成后 cdInto 会改钉到 worktree
 	branch := strings.TrimSpace(b.Branch)
 	if branch == "" {
 		branch = autoBranch(b.Name)
@@ -357,6 +361,12 @@ func (a *API) SessionFork(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "FORK_FAILED", "message": ttmux.StripANSI(out)}})
 		return
+	}
+	// 子会话继承父的归属（fork 缺省就是继承父 cwd）：显式 dir 优先，否则跟父同项目。
+	if d := strings.TrimSpace(b.Dir); d != "" {
+		a.WT.BindSessionHome(b.Child, d)
+	} else if home := a.WT.SessionHome(parent); home != "" {
+		a.WT.BindSessionHome(b.Child, home)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"session": b.Child, "parent": parent}, "name": b.Child})
 }
@@ -400,6 +410,7 @@ func (a *API) SessionForkWorktree(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "FORK_FAILED", "message": ttmux.StripANSI(out)}})
 		return
 	}
+	a.WT.BindSessionHome(b.Child, dir) // 先钉父仓库，下面 cdInto 改钉到新 worktree
 	var forked map[string]string
 	_ = json.Unmarshal([]byte(out), &forked)
 	branch := strings.TrimSpace(b.Branch)
