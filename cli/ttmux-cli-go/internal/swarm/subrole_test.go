@@ -24,7 +24,7 @@ func TestSubroleDutyRoundTrip(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "h")
 	opt := Options{HomeDir: home, DataDir: filepath.Join(home, "data"), Now: func() time.Time { return time.Unix(100, 0) }}
 	st := NewStore(opt)
-	if _, err := st.NewSwarm("sw", "goal"); err != nil {
+	if _, err := st.NewSwarm("sw", "goal", ""); err != nil {
 		t.Fatal(err)
 	}
 	// 细分角色用别名写入，应被 SubroleNorm 归一为 frontend
