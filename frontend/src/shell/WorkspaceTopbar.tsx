@@ -39,8 +39,15 @@ export function WorkspaceTopbar({ items, online, dockCount, dockOpen, onToggleDo
       // `/` 是无修饰键，正在打字时绝不能抢
       if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); setOpen(true) }
     }
+    // 导航轨顶部那枚放大镜（13 §13.2）也开这同一个面板。用事件而不是把 open 提到
+    // App：面板的搜索状态只属于顶栏，提上去就得把它整套状态跟着提上去。
+    const onOpen = () => setOpen(true)
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('tt-open-palette', onOpen)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('tt-open-palette', onOpen)
+    }
   }, [])
 
   return (
@@ -67,9 +74,11 @@ export function WorkspaceTopbar({ items, online, dockCount, dockOpen, onToggleDo
           }}>{modKey}K</kbd>
         </button>
 
-        <button onClick={onCreate} style={{
+        {/* 全站唯一的新建入口（14 §4.5）。页面工具条里不再重复放一枚——两枚同色同权重
+            的「＋ 新建 / ＋ 新项目」上下相邻，第一眼分不清该点哪个。 */}
+        <button onClick={onCreate} className="tt-top-create" style={{
           marginLeft: 'auto', height: 28, padding: '0 11px', border: 0, borderRadius: 6,
-          color: '#fff', background: '#1f6feb', fontSize: 12, cursor: 'pointer',
+          color: '#fff', background: 'var(--accent-solid)', fontSize: 12, cursor: 'pointer',
         }}>＋ {t('common.create')}</button>
 
         <span title={online ? t('workspace.online') : t('workspace.offline')} style={{
